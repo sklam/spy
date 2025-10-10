@@ -1,0 +1,50 @@
+from mlir import MLIR_Type, MLIR_op
+from unsafe import ptr
+
+
+@blue.generic
+def MLIR_tensor_unranked(dtype):
+    if dtype == f64:
+        typename = 'f64'
+    else:
+        raise TypeError
+    name = 'tensor<*x' + typename + '>'
+    return MLIR_Type(name)
+
+
+@blue.generic
+def make_tensor_type(DTYPE):
+    T = MLIR_tensor_unranked[DTYPE]
+    fn_tensor_add = MLIR_op("tensor.add", T, (T, T))
+
+    @typelift
+    class TensorType:
+        __ll__: T
+
+        def __new__(value: T) -> TensorType:
+            return TensorType.__lift__(value)
+
+        def __add__(self: TensorType, other: TensorType) -> TensorType:
+            return TensorType(fn_tensor_add(self.__ll__, other.__ll__))
+
+    return TensorType
+
+
+
+@blue.generic
+def tensor_2d(dtype):
+    T = MLIR_tensor_unranked[dtype]
+    TT = make_tensor_type[dtype]
+    fn_tensor_empty = MLIR_op("tensor.empty", T, (i32, i32))
+
+    def ctor_tensor(d0: i32, d1: i32) -> TT:
+        data = fn_tensor_empty(d0, d1)
+        return TT(data)
+    return ctor_tensor
+
+
+def main() -> None:
+    ary1 = tensor_2d[f64](2, 3)
+    ary2 = tensor_2d[f64](2, 1)
+    print(ary1 + ary2)
+

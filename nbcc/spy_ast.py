@@ -39,12 +39,7 @@ class Dumper:
         *,
         fields_to_ignore: Any = (),
     ) -> None:
-        self.fields_to_ignore = (
-            "loc",
-            "target_loc",
-            "target_locs",
-            "loc_asname",
-        ) + tuple(fields_to_ignore)
+        self.fields_to_ignore = tuple(fields_to_ignore)
         self.vm = vm
 
     def dump_anything(self, obj: Any) -> Node:

@@ -25,7 +25,7 @@ class W_MLIR_Type(W_Type):
         return W_MLIR_Type.from_pyclass(fqn, W_Object)
 
 
-@MLIR.builtin_func("MLIR_op", color="blue")
+@MLIR.builtin_func("MLIR_op")
 def w_MLIR_op(
     vm: "SPyVM", w_opname: W_Str, w_restype: W_Type, w_argtypes: W_Tuple
 ) -> W_BuiltinFunc:

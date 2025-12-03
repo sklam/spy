@@ -17,12 +17,29 @@ MLIR = ModuleRegistry("mlir")
 
 @MLIR.builtin_type("MLIR_Type")
 class W_MLIR_Type(W_Type):
+    original_name: str
+
     @builtin_method("__new__")
     @staticmethod
-    def w_new(vm: "SPyVM", w_name: W_Str) -> "W_MLIR_Type":
+    def w_new(vm: "SPyVM", w_name: W_Str, *w_argtypes: "W_MLIR_Type") -> "W_MLIR_Type":
         name = vm.unwrap_str(w_name)
-        fqn = FQN(["mlir", "type", name])
-        return W_MLIR_Type.from_pyclass(fqn, W_Object)
+
+        def fmt(t: "W_MLIR_Type"):
+            fn = getattr(t, "w_str", None)
+            if fn is not None:
+                return vm.unwrap_str(fn(vm, t))
+            else:
+                raise TypeError
+
+        fqn = FQN(["mlir", "type", name.format(*map(fmt, w_argtypes))])
+        w_type = W_MLIR_Type.from_pyclass(fqn, W_Object)
+        w_type.original_name = name
+        return w_type
+
+    @builtin_method("__str__")
+    @staticmethod
+    def w_str(vm: "SPyVM", w_self: "W_MLIR_Type") -> "W_Str":
+        return vm.wrap(str(w_self.original_name))
 
 
 @MLIR.builtin_func("MLIR_op")
@@ -43,5 +60,28 @@ def w_MLIR_op(
     fqn = FQN(["mlir", "op", opname])
     w_op = W_BuiltinFunc(w_functype, fqn, w_opimpl)
     irtag = IRTag("mlir.op")  # we can add any extra metadata we want here
+    vm.add_global(fqn, w_op, irtag=irtag)
+    return w_op
+
+
+@MLIR.builtin_func("MLIR_asm")
+def w_MLIR_asm(
+    vm: "SPyVM", w_asm: W_Str, w_restype: W_Type, w_argtypes: W_Tuple
+) -> W_BuiltinFunc:
+    RESTYPE = Annotated[W_Object, w_restype]
+    asm = vm.unwrap_str(w_asm)
+    argtypes_w = w_argtypes.items_w
+    opname = asm.replace(" ", "$")
+
+    # functype
+    params = [FuncParam(w_T, "simple") for w_T in argtypes_w]
+    w_functype = W_FuncType.new(params, w_restype=w_restype)
+
+    def w_opimpl(vm: "SPyVM", *args_w: W_Object) -> RESTYPE:
+        raise NotImplementedError("MLIR ops are not supposed to be called")
+
+    fqn = FQN(["mlir", "asm", opname])
+    w_op = W_BuiltinFunc(w_functype, fqn, w_opimpl)
+    irtag = IRTag("mlir.asm", asm=asm)  # we can add any extra metadata we want here
     vm.add_global(fqn, w_op, irtag=irtag)
     return w_op

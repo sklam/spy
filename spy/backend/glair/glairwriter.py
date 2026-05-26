@@ -1,0 +1,563 @@
+import math
+from types import NoneType
+from typing import TYPE_CHECKING
+
+from spy import ast
+from spy.backend.c import c_ast as C
+from spy.backend.glair.context import Context, GLAIR_Ident
+from spy.errors import SPyError
+from spy.fqn import FQN
+from spy.location import Loc
+from spy.textbuilder import TextBuilder
+from spy.util import magic_dispatch, shortrepr
+from spy.vm.b import TYPES, B
+from spy.vm.function import W_ASTFunc, W_Func
+from spy.vm.irtag import IRTag
+from spy.vm.modules.posix import W__FILE
+from spy.vm.modules.unsafe.ptr import W_Ptr
+from spy.vm.struct import W_StructType
+
+if TYPE_CHECKING:
+    from spy.backend.glair.glairmodwriter import GlairModuleWriter
+
+# Mapping from W_Type to GLAIR integer/float literal suffixes
+_SUFFIX_MAP = {
+    B.w_i8: "_i8",
+    B.w_u8: "_u8",
+    B.w_i32: "_i32",
+    B.w_u32: "_u32",
+    B.w_f32: "_f32",
+    B.w_f64: "_f64",
+}
+
+
+def _fmt_float_body(val: float) -> str:
+    """
+    Format a float value without scientific notation, with a digit
+    on both sides of the decimal point.
+    """
+    s = repr(val)
+    if "e" in s or "E" in s or math.isinf(val) or math.isnan(val):
+        # Expand to fixed-point with enough precision
+        s = format(abs(val), ".17f").rstrip("0")
+        if s.endswith("."):
+            s += "0"
+        if val < 0:
+            s = "-" + s
+    if "." not in s:
+        s += ".0"
+    # Ensure a digit on both sides of '.'
+    if s.startswith("."):
+        s = "0" + s
+    elif s.startswith("-."):
+        s = "-0." + s[2:]
+    return s
+
+
+def _glair_string_literal(b: bytes) -> str:
+    """
+    Format bytes as a GLAIR string literal (double-quoted).
+    Uses only the GLAIR escape set: \\n, \\t, \\r, \\0, \\\\, \\", \\xNN.
+    No C-style "" concatenation tricks needed since \\xNN is exactly 2 hex digits.
+    """
+
+    def char_repr(val: int) -> str:
+        if val == ord("\\"):
+            return r"\\"
+        elif val == ord('"'):
+            return r"\""
+        elif val == ord("\n"):
+            return r"\n"
+        elif val == ord("\t"):
+            return r"\t"
+        elif val == ord("\r"):
+            return r"\r"
+        elif val == 0:
+            return r"\0"
+        elif 32 <= val < 127:
+            return chr(val)
+        return rf"\x{val:02x}"
+
+    return '"' + "".join(char_repr(v) for v in b) + '"'
+
+
+class GlairFuncWriter:
+    ctx: Context
+    gmodw: "GlairModuleWriter"
+    tb: TextBuilder
+    fqn: FQN
+    w_func: W_ASTFunc
+    last_emitted_lineno: int
+
+    def __init__(
+        self,
+        ctx: Context,
+        gmodw: "GlairModuleWriter",
+        fqn: FQN,
+        w_func: W_ASTFunc,
+    ) -> None:
+        self.ctx = ctx
+        self.gmodw = gmodw
+        self.tb = gmodw.tb_content
+        self.fqn = fqn
+        self.last_emitted_lineno = -1
+
+        assert w_func.lowering_stage == "linearize"
+        self.w_func = w_func
+
+    def emit(self) -> None:
+        self.emit_local_vars()
+        for stmt in self.w_func.funcdef.body:
+            self.emit_stmt(stmt)
+
+        if self.w_func.w_functype.w_restype is not TYPES.w_NoneType:
+            # Non-void function: guard against falling off the end; abort() is
+            # declared in _prelude which every module imports
+            msg = "reached the end of the function without a `return`"
+            self.tb.wl(f"abort(); // {msg}")
+
+    def emit_local_vars(self) -> None:
+        assert self.w_func.locals_types_w is not None
+        param_names = [arg.name for arg in self.w_func.funcdef.args]
+        for varname, w_T in self.w_func.locals_types_w.items():
+            if w_T is TYPES.w_NoneType:
+                # GLAIR §3.7: no void-typed variable declarations
+                continue
+            if varname in ("@return", "@if", "@and", "@or", "@while", "@assert"):
+                continue
+            if varname in param_names:
+                continue
+            glair_varname = GLAIR_Ident(varname)
+            c_type = self.ctx.w2c(w_T)
+            self.tb.wl(f"let {glair_varname}: {c_type};")
+
+    def emit_lineno_maybe(self, loc: Loc) -> None:
+        if loc.line_start != self.last_emitted_lineno:
+            self.emit_lineno(loc.line_start)
+
+    def emit_lineno(self, spyline: int) -> None:
+        if self.gmodw.glair_mod.spyfile is None:
+            return
+        spyfile = str(self.gmodw.glair_mod.spyfile)
+        self.tb.wl(f'@loc("{spyfile}", {spyline})')
+        self.last_emitted_lineno = spyline
+
+    def emit_stmt(self, stmt: ast.Stmt) -> None:
+        self.emit_lineno_maybe(stmt.loc)
+        magic_dispatch(self, "emit_stmt", stmt)
+
+    def fmt_expr(self, expr: ast.Expr) -> C.Expr:
+        return magic_dispatch(self, "fmt_expr", expr)
+
+    def fmt_expr_BlockExpr(self, expr: ast.BlockExpr) -> C.Expr:
+        msg = (
+            "The GLAIR backend doesn't support ast.BlockExpr.\n"
+            + "This probably means that there is a bug in the compilation pipeline\n"
+            + "and that `linearize` was not called."
+        )
+        raise SPyError.simple("W_ValueError", msg, "", expr.loc)
+
+    # ===== statements =====
+
+    def emit_stmt_Pass(self, stmt: ast.Pass) -> None:
+        pass
+
+    def emit_stmt_Break(self, stmt: ast.Break) -> None:
+        self.tb.wl("break;")
+
+    def emit_stmt_Continue(self, stmt: ast.Continue) -> None:
+        self.tb.wl("continue;")
+
+    def emit_stmt_Return(self, ret: ast.Return) -> None:
+        v = self.fmt_expr(ret.value)
+        if v is C.Void():
+            self.tb.wl("return;")
+        else:
+            self.tb.wl(f"return {v};")
+
+    def emit_stmt_VarDef(self, vardef: ast.VarDef) -> None:
+        # Local variable declaration is in emit_local_vars; here we assign the value
+        if vardef.value:
+            target = vardef.name.value
+            v = self.fmt_expr(vardef.value)
+            if vardef.value.w_T is TYPES.w_NoneType:
+                # void-typed: emit the call for side effects, drop the assignment
+                if v is not C.Void():
+                    self.tb.wl(f"{v};")
+            else:
+                self.tb.wl(f"{target} = {v};")
+
+    def emit_stmt_Assign(self, assign: ast.Assign) -> None:
+        assert False, "ast.Assign nodes should not survive redshifting"
+
+    def emit_stmt_AssignLocal(self, assign: ast.AssignLocal) -> None:
+        target = assign.target.value
+        v = self.fmt_expr(assign.value)
+        glair_varname = GLAIR_Ident(target)
+        if assign.value.w_T is TYPES.w_NoneType:
+            # void-typed: keep the call, drop the assignment target
+            if v is not C.Void():
+                self.tb.wl(f"{v};")
+        else:
+            self.tb.wl(f"{glair_varname} = {v};")
+
+    def emit_stmt_AssignCell(self, assign: ast.AssignCell) -> None:
+        v = self.fmt_expr(assign.value)
+        target = assign.target_fqn.c_name
+        glair_varname = GLAIR_Ident(target)
+        self.tb.wl(f"{glair_varname} = {v};")
+
+    def emit_stmt_UnpackAssign(self, unpack: ast.UnpackAssign) -> None:
+        if isinstance(unpack.value, ast.Tuple):
+            for target, item in zip(unpack.targets, unpack.value.items):
+                glair_target = GLAIR_Ident(target.value)
+                v = self.fmt_expr(item)
+                self.tb.wl(f"{glair_target} = {v};")
+        else:
+            assert unpack.value.w_T is not None
+            c_tuple_type = self.ctx.w2c(unpack.value.w_T)
+            v = self.fmt_expr(unpack.value)
+            self.tb.wl("{")
+            with self.tb.indent():
+                self.tb.wl(f"let tmp: {c_tuple_type};")
+                self.tb.wl(f"tmp = {v};")
+                for i, target in enumerate(unpack.targets):
+                    glair_target = GLAIR_Ident(target.value)
+                    self.tb.wl(f"{glair_target} = tmp._item{i};")
+            self.tb.wl("}")
+
+    def emit_stmt_StmtExpr(self, stmt: ast.StmtExpr) -> None:
+        v = self.fmt_expr(stmt.value)
+        if v is C.Void():
+            pass
+        else:
+            self.tb.wl(f"{v};")
+
+    def emit_stmt_If(self, if_node: ast.If) -> None:
+        test = self.fmt_expr(if_node.test)
+        self.tb.wl(f"if ({test})" + " {")
+        with self.tb.indent():
+            for stmt in if_node.then_body:
+                self.emit_stmt(stmt)
+        if if_node.else_body:
+            self.tb.wl("} else {")
+            with self.tb.indent():
+                for stmt in if_node.else_body:
+                    self.emit_stmt(stmt)
+        self.tb.wl("}")
+
+    def emit_stmt_While(self, while_node: ast.While) -> None:
+        test = self.fmt_expr(while_node.test)
+        self.tb.wl(f"while ({test})" + " {")
+        with self.tb.indent():
+            for stmt in while_node.body:
+                self.emit_stmt(stmt)
+        self.tb.wl("}")
+
+    def emit_stmt_Assert(self, assert_node: ast.Assert) -> None:
+        test = self.fmt_expr(assert_node.test)
+        self.tb.wl(f"if (!({test}))" + " {")
+        with self.tb.indent():
+            if assert_node.msg is not None:
+                msg = self.fmt_expr(assert_node.msg)
+                self.tb.wl(
+                    f'spy_panic("AssertionError", ({msg})->utf8, '
+                    f'"{assert_node.loc.filename}", {assert_node.loc.line_start});'
+                )
+            else:
+                self.tb.wl(
+                    f'spy_panic("AssertionError", "assertion failed", '
+                    f'"{assert_node.loc.filename}", {assert_node.loc.line_start});'
+                )
+        self.tb.wl("}")
+
+    # ===== expressions =====
+
+    def fmt_expr_Constant(self, const: ast.Constant) -> C.Expr:
+        T = type(const.value)
+        assert T in (int, float, complex, bool, NoneType)
+        if T is NoneType:
+            return C.Void()
+        elif T is bool:
+            return C.Literal("true" if const.value else "false")
+        elif T is int:
+            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
+            val = int(const.value)
+            if val < 0:
+                return C.UnaryOp("-", C.Literal(f"{-val}{suffix}"))
+            return C.Literal(f"{val}{suffix}")
+        elif T is float:
+            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
+            body = _fmt_float_body(float(const.value))
+            if body.startswith("-"):
+                return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
+            return C.Literal(f"{body}{suffix}")
+        else:
+            assert T is complex
+            val = complex(const.value)
+            re_body = _fmt_float_body(val.real)
+            im_body = _fmt_float_body(val.imag)
+            # Use named-field compound literal syntax
+            if re_body.startswith("-"):
+                re_expr = f"-{re_body[1:]}_f64"
+            else:
+                re_expr = f"{re_body}_f64"
+            if im_body.startswith("-"):
+                im_expr = f"-{im_body[1:]}_f64"
+            else:
+                im_expr = f"{im_body}_f64"
+            return C.Literal(f"spy_Complex128 {{ real: {re_expr}, imag: {im_expr}, }}")
+
+    def fmt_expr_StrConst(self, const: ast.StrConst) -> C.Expr:
+        # String literals must be initialized as GLAIR globals.
+        # Generate:
+        #     let _g_str0: spy_Str = spy_Str { length: N_usize, flags: 0_i32, data: "...", };
+        s = const.value
+        utf8 = s.encode("utf-8")
+        v = self.gmodw.new_global_var("str")  # _g_str0
+        n = len(utf8)
+        lit = _glair_string_literal(utf8)
+        comment = shortrepr(utf8.decode("utf-8"), 15)
+        self.gmodw.tb_globals.wl(
+            f"let {v}: spy_Str = spy_Str"
+            f" {{ length: {n}_usize, flags: 0_i32, data: {lit}, }};"
+            f"  // {comment}"
+        )
+        return C.UnaryOp("&", C.Literal(v))
+
+    def fmt_expr_FQNConst(self, const: ast.FQNConst) -> C.Expr:
+        w_obj = self.ctx.vm.lookup_global(const.fqn)
+        if isinstance(w_obj, W_Ptr):
+            assert w_obj.addr == 0, "only NULL ptrs can be constants"
+            return C.Literal(const.fqn.c_name)
+        elif isinstance(w_obj, W_Func):
+            return C.Literal(const.fqn.c_name)
+        elif isinstance(w_obj, W__FILE):
+            assert w_obj.h == 0, "only NULL _FILE can be a constant"
+            # GLAIR doesn't have a NULL keyword; use a zero-init for FILE pointers
+            return C.Literal("NULL")
+        else:
+            w_T = self.ctx.vm.dynamic_type(w_obj)
+            t = w_T.fqn.human_name
+            raise SPyError.simple(
+                "W_WIP",
+                f"Prebuilt constant of type `{t}` are not supported by the GLAIR backend",
+                f"This is `{t}`",
+                const.loc,
+            )
+
+    def fmt_expr_Name(self, name: ast.Name) -> C.Expr:
+        assert False, "ast.Name nodes should not survive redshifting"
+
+    def fmt_expr_NameLocalDirect(self, name: ast.NameLocalDirect) -> C.Expr:
+        varname = GLAIR_Ident(name.sym.name)
+        if name.w_T is TYPES.w_NoneType:
+            return C.Void()
+        else:
+            return C.Literal(f"{varname}")
+
+    def fmt_expr_NameOuterCell(self, name: ast.NameOuterCell) -> C.Expr:
+        return C.Literal(name.fqn.c_name)
+
+    def fmt_expr_NameOuterDirect(self, name: ast.NameOuterDirect) -> C.Expr:
+        assert False, "unexpected NameOuterDirect"
+
+    def fmt_expr_AssignExpr(self, assignexpr: ast.AssignExpr) -> C.Expr:
+        return self._fmt_assignexpr(assignexpr.target.value, assignexpr.value)
+
+    def fmt_expr_AssignExprLocal(self, assignexpr: ast.AssignExprLocal) -> C.Expr:
+        return self._fmt_assignexpr(assignexpr.target.value, assignexpr.value)
+
+    def fmt_expr_AssignExprCell(self, assignexpr: ast.AssignExprCell) -> C.Expr:
+        return self._fmt_assignexpr(assignexpr.target_fqn.c_name, assignexpr.value)
+
+    def _fmt_assignexpr(self, target: str, value_expr: ast.Expr) -> C.Expr:
+        target_lit = C.Literal(target)
+        value = self.fmt_expr(value_expr)
+        return C.BinOp("=", target_lit, value)
+
+    def fmt_expr_BinOp(self, binop: ast.BinOp) -> C.Expr:
+        raise NotImplementedError(
+            "ast.BinOp not supported. It should have been redshifted away"
+        )
+
+    def fmt_expr_And(self, op: ast.And) -> C.Expr:
+        l = self.fmt_expr(op.left)
+        r = self.fmt_expr(op.right)
+        return C.BinOp("&&", l, r)
+
+    def fmt_expr_Or(self, op: ast.Or) -> C.Expr:
+        l = self.fmt_expr(op.left)
+        r = self.fmt_expr(op.right)
+        return C.BinOp("||", l, r)
+
+    FQN2BinOp = {
+        FQN("operator::i8_add"): "+",
+        FQN("operator::i8_sub"): "-",
+        FQN("operator::i8_mul"): "*",
+        FQN("operator::i8_lshift"): "<<",
+        FQN("operator::i8_rshift"): ">>",
+        FQN("operator::i8_and"): "&",
+        FQN("operator::i8_or"): "|",
+        FQN("operator::i8_xor"): "^",
+        FQN("operator::i8_eq"): "==",
+        FQN("operator::i8_ne"): "!=",
+        FQN("operator::i8_lt"): "<",
+        FQN("operator::i8_le"): "<=",
+        FQN("operator::i8_gt"): ">",
+        FQN("operator::i8_ge"): ">=",
+        #
+        FQN("operator::u8_add"): "+",
+        FQN("operator::u8_sub"): "-",
+        FQN("operator::u8_mul"): "*",
+        FQN("operator::u8_lshift"): "<<",
+        FQN("operator::u8_rshift"): ">>",
+        FQN("operator::u8_and"): "&",
+        FQN("operator::u8_or"): "|",
+        FQN("operator::u8_xor"): "^",
+        FQN("operator::u8_eq"): "==",
+        FQN("operator::u8_ne"): "!=",
+        FQN("operator::u8_lt"): "<",
+        FQN("operator::u8_le"): "<=",
+        FQN("operator::u8_gt"): ">",
+        FQN("operator::u8_ge"): ">=",
+        #
+        FQN("operator::i32_add"): "+",
+        FQN("operator::i32_sub"): "-",
+        FQN("operator::i32_mul"): "*",
+        FQN("operator::i32_lshift"): "<<",
+        FQN("operator::i32_rshift"): ">>",
+        FQN("operator::i32_and"): "&",
+        FQN("operator::i32_or"): "|",
+        FQN("operator::i32_xor"): "^",
+        FQN("operator::i32_eq"): "==",
+        FQN("operator::i32_ne"): "!=",
+        FQN("operator::i32_lt"): "<",
+        FQN("operator::i32_le"): "<=",
+        FQN("operator::i32_gt"): ">",
+        FQN("operator::i32_ge"): ">=",
+        #
+        FQN("operator::u32_add"): "+",
+        FQN("operator::u32_sub"): "-",
+        FQN("operator::u32_mul"): "*",
+        FQN("operator::u32_lshift"): "<<",
+        FQN("operator::u32_rshift"): ">>",
+        FQN("operator::u32_and"): "&",
+        FQN("operator::u32_or"): "|",
+        FQN("operator::u32_xor"): "^",
+        FQN("operator::u32_eq"): "==",
+        FQN("operator::u32_ne"): "!=",
+        FQN("operator::u32_lt"): "<",
+        FQN("operator::u32_le"): "<=",
+        FQN("operator::u32_gt"): ">",
+        FQN("operator::u32_ge"): ">=",
+        #
+        FQN("operator::f64_add"): "+",
+        FQN("operator::f64_sub"): "-",
+        FQN("operator::f64_mul"): "*",
+        FQN("unsafe::f64_ieee754_div"): "/",
+        FQN("operator::f64_eq"): "==",
+        FQN("operator::f64_ne"): "!=",
+        FQN("operator::f64_lt"): "<",
+        FQN("operator::f64_le"): "<=",
+        FQN("operator::f64_gt"): ">",
+        FQN("operator::f64_ge"): ">=",
+    }
+
+    FQN2UnaryOp = {
+        FQN("operator::i8_neg"): "-",
+        FQN("operator::i32_neg"): "-",
+        FQN("operator::f64_neg"): "-",
+    }
+
+    def fmt_expr_Call(self, call: ast.Call) -> C.Expr:
+        assert isinstance(call.func, ast.FQNConst), (
+            "indirect calls are not supported yet"
+        )
+        fqn = call.func.fqn
+
+        irtag = self.ctx.vm.get_irtag(fqn)
+
+        if op := self.FQN2BinOp.get(fqn):
+            assert len(call.args) == 2
+            l, r = [self.fmt_expr(arg) for arg in call.args]
+            return C.BinOp(op, l, r)
+
+        elif op := self.FQN2UnaryOp.get(fqn):
+            assert len(call.args) == 1
+            v = self.fmt_expr(call.args[0])
+            return C.UnaryOp(op, v)
+
+        elif irtag.tag == "struct.make":
+            return self.fmt_struct_make(fqn, call, irtag)
+
+        elif irtag.tag == "struct.getfield":
+            return self.fmt_struct_getfield(fqn, call, irtag)
+
+        elif irtag.tag == "ptr.getfield":
+            return self.fmt_ptr_getfield(fqn, call, irtag)
+
+        elif irtag.tag == "ptr.setfield":
+            return self.fmt_ptr_setfield(fqn, call)
+
+        elif irtag.tag == "ptr.deref":
+            return self.fmt_generic_call(fqn, call)
+
+        elif irtag.tag in ("ptr.getitem", "ptr.store"):
+            # Remove the trailing W_Loc argument (GLAIR has @loc annotations instead)
+            assert isinstance(call.args[-1], ast.LocConst)
+            call.args.pop()
+            return self.fmt_generic_call(fqn, call)
+
+        else:
+            return self.fmt_generic_call(fqn, call)
+
+    def fmt_generic_call(self, fqn: FQN, call: ast.Call) -> C.Expr:
+        w_mod = self.ctx.vm.modules_w[fqn.modname]
+        if w_mod.is_builtin():
+            self.gmodw.add_extern_maybe(fqn)
+        else:
+            self.ctx.add_import_maybe(fqn)
+        c_name = fqn.c_name
+        c_args = [self.fmt_expr(arg) for arg in call.args]
+        return C.Call(c_name, c_args)
+
+    def fmt_struct_make(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:
+        w_func = self.ctx.vm.lookup_global(fqn)
+        assert isinstance(w_func, W_Func)
+        w_restype = w_func.w_functype.w_restype
+        assert isinstance(w_restype, W_StructType)
+        c_restype = self.ctx.w2c(w_restype)
+        fields = list(w_restype.iterfields_w())
+        c_args = [self.fmt_expr(arg) for arg in call.args]
+        field_inits = ", ".join(
+            f"{fields[i].name}: {c_args[i]}" for i in range(len(c_args))
+        )
+        return C.Literal(f"{c_restype} {{ {field_inits}, }}")
+
+    def fmt_struct_getfield(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:
+        assert len(call.args) == 1
+        c_struct = self.fmt_expr(call.args[0])
+        name = irtag.data["name"]
+        return C.Dot(c_struct, name)
+
+    def fmt_ptr_getfield(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:
+        assert isinstance(call.args[1], ast.StrConst)
+        c_ptr = self.fmt_expr(call.args[0])
+        attr = call.args[1].value
+        offset = call.args[2]  # ignored
+        c_field = C.PtrField(c_ptr, attr)
+        if irtag.data["by"] == "byref":
+            c_restype = self.ctx.c_restype_by_fqn(fqn)
+            return C.PtrFieldByRef(c_restype, c_field)
+        else:
+            return c_field
+
+    def fmt_ptr_setfield(self, fqn: FQN, call: ast.Call) -> C.Expr:
+        assert isinstance(call.args[1], ast.StrConst)
+        c_ptr = self.fmt_expr(call.args[0])
+        attr = call.args[1].value
+        offset = call.args[2]  # ignored
+        c_lval = C.PtrField(c_ptr, attr)
+        c_rval = self.fmt_expr(call.args[3])
+        return C.BinOp("=", c_lval, c_rval)

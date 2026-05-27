@@ -35,13 +35,6 @@ class _build_mixin:
         Option("--cdump", help="Dump the generated C code to stdout; do not compile"),
     ] = False
 
-    glairdump: Annotated[
-        bool,
-        Option(
-            "--glairdump", help="Dump the generated GLAIR to stdout; do not compile"
-        ),
-    ] = False
-
     build_dir: Annotated[
         Optional[Path],
         Option(
@@ -165,13 +158,6 @@ async def build(args: Build_Args) -> None:
 
     cwd = py.path.local(".")
     build_dir = get_build_dir(args)
-
-    if args.glairdump:
-        from spy.backend.glair.glairbackend import GlairBackend
-
-        glair_backend = GlairBackend(vm, modname, build_dir, dump_glair=True)
-        glair_backend.glairwrite()
-        return
 
     backend = CBackend(vm, modname, config, build_dir, dump_c=args.cdump)
 

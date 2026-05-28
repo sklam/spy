@@ -172,6 +172,12 @@ class GlairModuleWriter:
         c_restype = self.ctx.w2c(w_functype.w_restype)
         s_params = ", ".join(params)
 
-        self.tb_externs.wl("@builtin")
+        irtag = self.ctx.vm.get_irtag(fqn)
+        if irtag.tag == "mlir.asm":
+            self.tb_externs.wl(f'@mlir_op("{irtag.data["asm"]}")')
+        elif irtag.tag == "mlir.op":
+            self.tb_externs.wl(f'@mlir_op("{irtag.data["opname"]}")')
+        else:
+            self.tb_externs.wl("@builtin")
         self.tb_externs.wl(f"extern fn {c_name}({s_params}) -> {c_restype};")
         self.tb_externs.wl()

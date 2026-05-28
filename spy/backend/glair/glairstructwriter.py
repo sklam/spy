@@ -59,6 +59,12 @@ class GlairStructWriter:
     def _emit_content(self) -> None:
         for fqn, w_type in self.glair_structdefs.content:
             assert fqn == w_type.fqn
+            irtag = self.ctx.vm.get_irtag(fqn)
+            if irtag.tag == "mlir.type":
+                spelling = irtag.data["spelling"]
+                self.tb_structs.wl(f'mlir_type {w_type.fqn.c_name} = "{spelling}";')
+                self.tb_structs.wl()
+                continue
             if isinstance(w_type, W_StructType):
                 self._emit_StructType(fqn, w_type)
             elif isinstance(w_type, W_PtrType):

@@ -73,14 +73,12 @@ class GlairBackend:
                 continue
             modname = fqn.modname
             w_mod = self.vm.modules_w[modname]
-            if w_mod.filepath is None and not isinstance(
-                w_obj, (W_MemLocType, W_StructType)
-            ):
-                continue
-
             if isinstance(w_obj, W_Type):
+                irtag = self.vm.get_irtag(fqn)
+                if w_mod.filepath is None and irtag.tag != "mlir.type":
+                    continue
                 self.glair_structdefs["globals"].content.append((fqn, w_obj))
-            else:
+            elif w_mod.filepath is not None:
                 self.glair_modules[modname].content.append((fqn, w_obj))
 
     def _write_prelude(self) -> None:

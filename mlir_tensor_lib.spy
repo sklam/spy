@@ -1,0 +1,118 @@
+from mlir import MLIR_Type, MLIR_op_builder
+
+
+# Define dynamically sized 1D tensor in MLIR
+@blue.generic
+def MLIR_tensor_1d(dtype: MLIR_Type):
+    return MLIR_Type("tensor<?x{}>", dtype)
+
+
+# Define dynamically sized 1D memref in MLIR
+@blue.generic
+def MLIR_memref_1d(dtype: MLIR_Type):
+    return MLIR_Type("memref<?x{}>", dtype)
+
+
+# Define a Pythonic wrapper to define the binary operations
+@blue.generic
+def make_tensor_type(DTYPE: MLIR_Type):
+    # Define the lower level MLIR type of the tensor
+    T = MLIR_tensor_1d[DTYPE]
+
+    T_index = MLIR_Type("index")
+    mlir_zero_index = MLIR_op_builder("arith.constant {value=0:index}").result(T_index)
+    mlir_tensor_dim = MLIR_op_builder("tensor.dim").args(T, T_index).result(T_index)
+    mlir_tensor_empty = MLIR_op_builder("tensor.empty").args(T_index).result(T)
+    # linalg.add is more complicated as it has regions
+    # so using MLIR_op uses the MLIR python binding to fill in all the necessary
+    # attributes.
+    mlir_linalg_add = MLIR_op_builder("linalg.add").args(T, T, T).result(T)
+    mlir_linalg_mul = MLIR_op_builder("linalg.mul").args(T, T, T).result(T)
+
+    @struct
+    class TensorType:
+        __ll__: T  # The low-level type is the MLIR tensor
+
+        def __new__(value: T) -> TensorType:
+            return TensorType.__make__(value)
+
+        def __add__(self: TensorType, other: TensorType) -> TensorType:
+            lhs = self.__ll__
+            rhs = other.__ll__
+            # Write MLIR
+            c0 = mlir_zero_index()
+            dim = mlir_tensor_dim(lhs, c0)  # lhs.shape[0]
+            res = mlir_tensor_empty(dim)  # np.empty((dim,))
+            res = mlir_linalg_add(lhs, rhs, res)
+            # End MLIR
+            return TensorType(res)
+
+        def __mul__(self: TensorType, other: TensorType) -> TensorType:
+            lhs = self.__ll__
+            rhs = other.__ll__
+            # Write MLIR
+            c0 = mlir_zero_index()
+            dim = mlir_tensor_dim(lhs, c0)
+            res = mlir_tensor_empty(dim)
+            res = mlir_linalg_mul(lhs, rhs, res)
+            # End MLIR
+            return TensorType(res)
+
+    return TensorType
+
+
+@blue
+def exported() -> None:
+    # Alias for types
+    F64 = MLIR_Type("f64")
+    MemRefF64 = MLIR_memref_1d[F64]
+    TensorF64 = make_tensor_type[F64]
+
+    # Define conversion tensor <---> buffer
+    # Note the tensor type is the wrapped Pythonic class
+    to_tensor = MLIR_op_builder("bufferization.to_tensor {restrict}").args(MemRefF64).result(TensorF64)
+    to_memref = MLIR_op_builder("bufferization.to_buffer").args(TensorF64).result(MemRefF64)
+    bottom = MLIR_Type("()")
+    materialize_in_destination = MLIR_op_builder("bufferization.materialize_in_destination {restrict,writable}").args(TensorF64, MemRefF64).result(bottom)
+
+
+    def export_tensor_f64_add(a: MemRefF64, b: MemRefF64) -> MemRefF64:
+        ta = to_tensor(a)
+        tb = to_tensor(b)
+        tc = ta + tb
+        c = to_memref(tc)
+        return c
+
+
+    def export_tensor_f64_add_out(
+        a: MemRefF64, b: MemRefF64, out: MemRefF64
+    ) -> None:
+        ta = to_tensor(a)
+        tb = to_tensor(b)
+        tc = ta + tb
+        materialize_in_destination(tc, out)
+
+
+    def export_tensor_f64_arrayexpr(
+        a: MemRefF64, b: MemRefF64, c: MemRefF64
+    ) -> MemRefF64:
+        ta = to_tensor(a)
+        tb = to_tensor(b)
+        tc = to_tensor(c)
+        tres = (ta + tb) * (tc + ta)
+        return to_memref(tres)
+
+
+    def export_tensor_f64_arrayexpr_out(
+        a: MemRefF64, b: MemRefF64, c: MemRefF64, out: MemRefF64
+    ) -> None:
+        ta = to_tensor(a)
+        tb = to_tensor(b)
+        tc = to_tensor(c)
+        tres = (ta + tb) * (tc + ta)
+        materialize_in_destination(tres, out)
+
+    return None
+
+
+_ = exported()

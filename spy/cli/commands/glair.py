@@ -47,6 +47,11 @@ async def glair(args: Glair_Args) -> None:
     modname = args.filename.stem
     vm = await init_vm(args)
 
+    # Install custom builtins here
+    import extra_spy_builtins
+
+    vm.make_module(extra_spy_builtins.MLIR)
+
     importer = ImportAnalyzer(vm, modname, use_spyc=not args.no_spyc)
     importer.parse_all()
     importer.import_all()

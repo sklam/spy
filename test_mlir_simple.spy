@@ -1,0 +1,13 @@
+from mlir import MLIR_Type, MLIR_asm
+from __spy__ import interp_tuple
+
+@blue
+def exported() -> None:
+    F64 = MLIR_Type("f64")
+    T_index = MLIR_Type("index")
+    mlir_zero_index = MLIR_asm("arith.constant {value=0:index}", T_index, interp_tuple())
+
+    def run() -> None:
+        c0 = mlir_zero_index()
+
+_ = exported()

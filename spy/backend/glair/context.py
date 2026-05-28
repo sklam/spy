@@ -24,6 +24,7 @@ class GLAIR_Ident:
         "struct",
         "ptr_wrapper",
         "ref_alias",
+        "mlir_type",
         "return",
         "if",
         "else",

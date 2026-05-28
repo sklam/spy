@@ -36,12 +36,11 @@ MLIR = ModuleRegistry("mlir")
 
 
 class W_MLIR_Value(W_Object):
-    """
-    Base class for MLIR value objects.
-    MLIR values are opaque objects that represent SSA values in MLIR.
-    """
+    __spy_storage_category__ = "value"
 
-    __spy_storage_category__ = "reference"
+    def spy_key(self, vm: "SPyVM") -> object:
+        # MLIR values are red-only SSA values; identity suffices for blue-time caching
+        return id(self)
 
 
 _type_caches: dict[str, "W_MLIR_Type"] = {}

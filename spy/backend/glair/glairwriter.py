@@ -107,8 +107,10 @@ class GlairFuncWriter:
 
     def emit(self) -> None:
         self.emit_local_vars()
-        for stmt in self.w_func.funcdef.body:
-            self.emit_stmt(stmt)
+        stmts = self.w_func.funcdef.body
+        i = 0
+        while i < len(stmts):
+            i = self._emit_stmt_at(stmts, i)
 
         if self.w_func.w_functype.w_restype is not TYPES.w_NoneType:
             # Non-void function: guard against falling off the end; abort() is
@@ -128,8 +130,86 @@ class GlairFuncWriter:
             if varname in param_names:
                 continue
             glair_varname = GLAIR_Ident(varname)
+            irtag = self.ctx.vm.get_irtag(w_T.fqn)
+            if irtag.tag == "mlir.type" and irtag.data["spelling"] == "multivalues":
+                continue  # ephemeral intermediary, suppressed
             c_type = self.ctx.w2c(w_T)
             self.tb.wl(f"let {glair_varname}: {c_type};")
+
+    def _emit_stmt_at(self, stmts: list[ast.Stmt], i: int) -> int:
+        stmt = stmts[i]
+        if isinstance(stmt, ast.AssignLocal) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            if isinstance(call.func, ast.FQNConst):
+                irtag = self.ctx.vm.get_irtag(call.func.fqn)
+                if irtag.tag == "mlir.asm" and "asm" in irtag.data:
+                    return self._emit_mlir_stmt(stmts, i, stmt, call, irtag)
+        if isinstance(stmt, ast.StmtExpr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            if isinstance(call.func, ast.FQNConst):
+                irtag = self.ctx.vm.get_irtag(call.func.fqn)
+                if irtag.tag == "mlir.asm" and "asm" in irtag.data:
+                    return self._emit_mlir_stmt(stmts, i, None, call, irtag)
+        self.emit_stmt(stmt)
+        return i + 1
+
+    def _emit_mlir_stmt(
+        self,
+        stmts: list[ast.Stmt],
+        i: int,
+        stmt_or_none: "ast.AssignLocal | None",
+        call: ast.Call,
+        irtag: IRTag,
+    ) -> int:
+        asm = irtag.data["asm"]
+        args_str = ", ".join(str(self.fmt_expr(arg)) for arg in call.args)
+        loc = stmts[i].loc
+
+        if stmt_or_none is None or call.w_T is TYPES.w_NoneType:
+            self.emit_lineno_maybe(loc)
+            self.tb.wl(f'mlir "{asm}" ({args_str}) -> ();')
+            return i + 1
+
+        w_restype = call.w_T
+        assert w_restype is not None
+        res_irtag = self.ctx.vm.get_irtag(w_restype.fqn)
+
+        if (
+            res_irtag.tag == "mlir.type"
+            and res_irtag.data.get("spelling") == "multivalues"
+        ):
+            # multi-result: consume subsequent struct.getfield accesses on the intermediary
+            intermediary = stmt_or_none.target.value
+            results = []
+            j = i + 1
+            while j < len(stmts):
+                ns = stmts[j]
+                if (
+                    isinstance(ns, ast.AssignLocal)
+                    and isinstance(ns.value, ast.Call)
+                    and isinstance(ns.value.func, ast.FQNConst)
+                ):
+                    ns_irtag = self.ctx.vm.get_irtag(ns.value.func.fqn)
+                    if ns_irtag.tag == "struct.getfield":
+                        struct_arg = ns.value.args[0]
+                        if (
+                            isinstance(struct_arg, ast.NameLocalDirect)
+                            and struct_arg.sym.name == intermediary
+                        ):
+                            results.append(GLAIR_Ident(ns.target.value))
+                            j += 1
+                            continue
+                break
+            results_str = ", ".join(str(r) for r in results)
+            self.emit_lineno_maybe(loc)
+            self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({results_str});')
+            return j
+
+        else:
+            target = GLAIR_Ident(stmt_or_none.target.value)
+            self.emit_lineno_maybe(loc)
+            self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({target});')
+            return i + 1
 
     def emit_lineno_maybe(self, loc: Loc) -> None:
         if loc.line_start != self.last_emitted_lineno:
@@ -508,6 +588,15 @@ class GlairFuncWriter:
             assert isinstance(call.args[-1], ast.LocConst)
             call.args.pop()
             return self.fmt_generic_call(fqn, call)
+
+        elif irtag.tag == "mlir.asm" and "asm" in irtag.data:
+            raise SPyError.simple(
+                "W_ValueError",
+                "mlir.asm call reached expression context; "
+                "it must appear as a statement",
+                "",
+                call.loc,
+            )
 
         else:
             return self.fmt_generic_call(fqn, call)

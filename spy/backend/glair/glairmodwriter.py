@@ -174,7 +174,7 @@ class GlairModuleWriter:
 
         irtag = self.ctx.vm.get_irtag(fqn)
         if irtag.tag == "mlir.asm":
-            self.tb_externs.wl(f'@mlir_op("{irtag.data["asm"]}")')
+            return  # inlined as mlir statement, no extern fn needed
         elif irtag.tag == "mlir.op":
             self.tb_externs.wl(f'@mlir_op("{irtag.data["opname"]}")')
         else:

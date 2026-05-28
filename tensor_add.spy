@@ -1,0 +1,46 @@
+from mlir import MLIR_Type, MLIR_op_builder
+
+@blue
+def exported() -> None:
+    F64       = MLIR_Type("f64")
+    T         = MLIR_Type("tensor<?xf64>")
+    MemRefF64 = MLIR_Type("memref<?xf64>")
+    Idx       = MLIR_Type("index")
+
+    mlir_c0          = MLIR_op_builder("arith.constant {value=0:index}").result(Idx)
+    mlir_tensor_dim  = MLIR_op_builder("tensor.dim").args(T, Idx).result(Idx)
+    mlir_tensor_empty = MLIR_op_builder("tensor.empty").args(Idx).result(T)
+    mlir_linalg_add  = MLIR_op_builder("linalg.add").args(T, T, T).result(T)
+    to_tensor        = MLIR_op_builder("bufferization.to_tensor {restrict}").args(MemRefF64).result(T)
+    materialize      = MLIR_op_builder(
+        "bufferization.materialize_in_destination {restrict,writable}"
+    ).args(T, MemRefF64).result()
+
+    @struct
+    class TensorF64:
+        __ll__: T
+
+        def __new__(value: T) -> TensorF64:
+            return TensorF64.__make__(value)
+
+        def __add__(self: TensorF64, other: TensorF64) -> TensorF64:
+            lhs = self.__ll__
+            rhs = other.__ll__
+            c0  = mlir_c0()
+            n   = mlir_tensor_dim(lhs, c0)
+            res = mlir_tensor_empty(n)
+            res = mlir_linalg_add(lhs, rhs, res)
+            return TensorF64(res)
+
+        __eq__ = NotImplemented
+
+    def tensor_add_3(
+        a: MemRefF64, b: MemRefF64, c: MemRefF64, out: MemRefF64
+    ) -> None:
+        ta   = TensorF64(to_tensor(a))
+        tb   = TensorF64(to_tensor(b))
+        tc   = TensorF64(to_tensor(c))
+        tabc = ta + tb + tc   # two linalg.add with direct SSA edge — fusion opportunity
+        materialize(tabc.__ll__, out)
+
+_ = exported()

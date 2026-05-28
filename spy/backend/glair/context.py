@@ -25,6 +25,7 @@ class GLAIR_Ident:
         "ptr_wrapper",
         "ref_alias",
         "mlir_type",
+        "mlir",
         "return",
         "if",
         "else",
@@ -96,7 +97,11 @@ class Context:
             return self._d[w_T]
 
         elif isinstance(w_T, W_Type):
-            c_type = C_Type(w_T.fqn.c_name)
+            irtag = self.vm.get_irtag(w_T.fqn)
+            if irtag.tag == "mlir.type":
+                c_type = C_Type(f'mlir "{irtag.data["spelling"]}"')
+            else:
+                c_type = C_Type(w_T.fqn.c_name)
             self._d[w_T] = c_type
             return c_type
 

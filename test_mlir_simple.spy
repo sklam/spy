@@ -1,13 +1,20 @@
-from mlir import MLIR_Type, MLIR_asm
-from __spy__ import interp_tuple
+from mlir import MLIR_Type, MLIR_op_builder
 
 @blue
 def exported() -> None:
     F64 = MLIR_Type("f64")
     T_index = MLIR_Type("index")
-    mlir_zero_index = MLIR_asm("arith.constant {value=0:index}", T_index, interp_tuple())
+    mlir_zero_index = MLIR_op_builder("arith.constant {value=0:index}").result(T_index)
+    mlir_const_f64 = MLIR_op_builder("arith.constant {value=1.0:f64}").result(F64)
+
+    # math.sincos %input : f64 -> (sin: f64, cos: f64)
+    mlir_sincos = MLIR_op_builder("math.sincos").args(F64).result(F64, F64)
 
     def run() -> None:
         c0 = mlir_zero_index()
+        x = mlir_const_f64()
+        sc = mlir_sincos(x)
+        s = sc._field0
+        c = sc._field1
 
 _ = exported()

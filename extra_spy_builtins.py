@@ -7,6 +7,7 @@ from mlir_utils import (
 )
 from spy.fqn import FQN
 from spy.vm.b import TYPES, B
+from spy.vm.field import W_Field
 from spy.vm.function import (
     FuncParam,
     W_ASTFunc,
@@ -26,7 +27,7 @@ from spy.vm.object import W_Object, W_Type, builtin_method
 from spy.vm.opspec import W_MetaArg, W_OpSpec
 from spy.vm.registry import ModuleRegistry
 from spy.vm.str import W_Str
-from spy.vm.struct import W_Struct, W_StructType
+from spy.vm.struct import W_Struct, W_StructField, W_StructType, calc_layout
 
 if TYPE_CHECKING:
     from spy.vm.vm import SPyVM
@@ -50,6 +51,7 @@ _type_caches: dict[str, "W_MLIR_Type"] = {}
 class W_MLIR_Type(W_StructType):
     original_name: str
     size: int
+    members_w: "tuple[W_Type, ...]"
 
     @builtin_method("__new__", color="blue")
     @staticmethod
@@ -72,6 +74,7 @@ class W_MLIR_Type(W_StructType):
         w_type = W_MLIR_Type.from_pyclass(fqn, W_MLIR_Value)
         w_type.original_name = formatted_name
         w_type.size = 0  # Fake sizeof for SPy
+        w_type.members_w = ()
         _type_caches[fqn] = w_type
         vm.add_global(fqn, w_type, irtag=IRTag("mlir.type", spelling=formatted_name))
         return w_type
@@ -80,6 +83,42 @@ class W_MLIR_Type(W_StructType):
     @staticmethod
     def w_str(vm: "SPyVM", w_self: "W_MLIR_Type") -> "W_Str":
         return vm.wrap(str(w_self.original_name))
+
+
+def _make_multivalue_type(vm: "SPyVM", results_w: "list[W_Type]") -> "W_MLIR_Type":
+    """
+    Build an ephemeral struct type with _field0, _field1, ... for multi-result ops.
+    """
+    from spy.location import Loc
+
+    loc = Loc.here()
+    field_names = [f"_field{i}" for i in range(len(results_w))]
+    fields_w = {
+        name: W_Field(name, w_T, loc) for name, w_T in zip(field_names, results_w)
+    }
+    struct_fields_w, size = calc_layout(fields_w)
+
+    fqn = vm.get_unique_FQN(
+        create_mlir_type_fqn(
+            "multivalues$" + "|".join(f.fqn.fullname for f in results_w)
+        )
+    )
+    if fqn in _type_caches:
+        return _type_caches[fqn]  # type: ignore[return-value]
+
+    w_type = W_MLIR_Type.declare(fqn)
+    w_type.original_name = "multivalues"
+    w_type.size = size
+    w_type.members_w = tuple(results_w)
+
+    dict_w: dict[str, W_Object] = {}
+    for w_sf in struct_fields_w:
+        dict_w[w_sf.name] = w_sf
+    W_StructType.define(w_type, W_Struct, dict_w)
+
+    _type_caches[fqn] = w_type  # type: ignore[assignment]
+    vm.add_global(fqn, w_type, irtag=IRTag("mlir.type", spelling="multivalues"))
+    return w_type
 
 
 def _finalize_op(
@@ -96,14 +135,8 @@ def _finalize_op(
         fn_retty = results_w[0]
         resname = fn_retty.fqn.fullname
     else:
-        tyname = "multivalues"
-        fn_retty = W_MLIR_Type.w_new(vm, vm.wrap(tyname))
+        fn_retty = _make_multivalue_type(vm, results_w)
         resname = fn_retty.fqn.fullname
-        vm.add_global(
-            fn_retty.fqn,
-            fn_retty,
-            irtag=IRTag("members", members=tuple(results_w)),
-        )
 
     RESTYPE = Annotated[W_Object, fn_retty]
     opname = encode_asm_operation([asm, resname])
@@ -200,9 +233,7 @@ def w_MLIR_unpack(vm: "SPyVM", w_fn: W_Func, w_idx: W_Object) -> W_BuiltinFunc:
     restype = cast(W_MLIR_Type, w_fn.w_functype.w_restype)
 
     assert restype.original_name.startswith("multivalues")
-    # members = parse_composite_type(restype.original_name)
-    irtag = vm.get_irtag(restype.fqn)
-    types = irtag.data["members"]
+    types = restype.members_w
 
     idx = vm.unwrap_i32(w_idx)
     retty = types[idx]
@@ -230,16 +261,9 @@ def w_MLIR_asm(
 ) -> W_BuiltinFunc:
     RESTYPE: Any
     if isinstance(w_restype, W_InterpTuple):
-        inner_types_w = w_restype.items_w
-        tyname = "multivalues"
-        fn_retty = W_MLIR_Type.w_new(vm, vm.wrap(tyname))
+        fn_retty = _make_multivalue_type(vm, list(w_restype.items_w))
         RESTYPE = Annotated[W_Object, fn_retty]
         resname = fn_retty.fqn.fullname
-        vm.add_global(
-            fn_retty.fqn,
-            fn_retty,
-            irtag=IRTag("members", members=tuple(inner_types_w)),
-        )
     elif isinstance(w_restype, W_Type):
         RESTYPE = Annotated[W_Object, w_restype]
         fn_retty = w_restype

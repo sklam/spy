@@ -108,6 +108,7 @@ class GlairFuncWriter:
         self.tb = gmodw.tb_content
         self.fqn = fqn
         self.last_emitted_lineno = -1
+        self._unused_result_counter = 0
 
         assert w_func.lowering_stage == "linearize"
         self.w_func = w_func
@@ -175,6 +176,14 @@ class GlairFuncWriter:
             return irtag
         return None
 
+    def _fresh_unused_local(self, w_T: W_Type) -> GLAIR_Ident:
+        # GLAIR requires a name for every MLIR result, even when SPy drops it.
+        name = f"$unused{self._unused_result_counter}"
+        self._unused_result_counter += 1
+        c_type = self.ctx.w2c(w_T)
+        self.tb.wl(f"let {GLAIR_Ident(name)}: {c_type};")
+        return GLAIR_Ident(name)
+
     def _emit_mlir_stmt(
         self,
         loc: Loc,
@@ -185,7 +194,7 @@ class GlairFuncWriter:
         asm = _escape_glair_asm(irtag.data["asm"])
         args_str = ", ".join(str(self.fmt_expr(arg)) for arg in call.args)
 
-        if target_name is None or call.w_T is TYPES.w_NoneType:
+        if call.w_T is TYPES.w_NoneType:
             self.emit_lineno_maybe(loc)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ();')
             return
@@ -193,21 +202,30 @@ class GlairFuncWriter:
         w_restype = call.w_T
         assert w_restype is not None
         res_irtag = self.ctx.vm.get_irtag(w_restype.fqn)
-
-        if (
+        is_multivalues = (
             res_irtag.tag == "mlir.type"
             and res_irtag.data.get("spelling") == "multivalues"
-        ):
-            # multi-result: GLAIR has no multi-value type, so each result binds
-            # directly to the per-field local declared in emit_local_vars.
-            fields = self._multivalues_fanout[target_name]
-            results_str = ", ".join(str(GLAIR_Ident(f)) for f in fields)
-            self.emit_lineno_maybe(loc)
+        )
+
+        self.emit_lineno_maybe(loc)
+        if is_multivalues:
+            # GLAIR has no multi-value type, so each result binds directly to
+            # the per-field local declared in emit_local_vars.
+            if target_name is None:
+                members_w = w_restype.members_w  # type: ignore[attr-defined]
+                results = [self._fresh_unused_local(w_fT) for w_fT in members_w]
+            else:
+                results = [
+                    GLAIR_Ident(f) for f in self._multivalues_fanout[target_name]
+                ]
+            results_str = ", ".join(str(r) for r in results)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({results_str});')
             return
 
-        target = GLAIR_Ident(target_name)
-        self.emit_lineno_maybe(loc)
+        if target_name is None:
+            target = self._fresh_unused_local(w_restype)
+        else:
+            target = GLAIR_Ident(target_name)
         self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({target});')
 
     def emit_lineno_maybe(self, loc: Loc) -> None:

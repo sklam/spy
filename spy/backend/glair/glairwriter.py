@@ -121,10 +121,8 @@ class GlairFuncWriter:
 
     def emit(self) -> None:
         self.emit_local_vars()
-        stmts = self.w_func.funcdef.body
-        i = 0
-        while i < len(stmts):
-            i = self._emit_stmt_at(stmts, i)
+        for stmt in self.w_func.funcdef.body:
+            self.emit_stmt(stmt)
 
         if self.w_func.w_functype.w_restype is not TYPES.w_NoneType:
             # Non-void function: guard against falling off the end; abort() is
@@ -167,39 +165,30 @@ class GlairFuncWriter:
             c_type = self.ctx.w2c(w_T)
             self.tb.wl(f"let {glair_varname}: {c_type};")
 
-    def _emit_stmt_at(self, stmts: list[ast.Stmt], i: int) -> int:
-        stmt = stmts[i]
-        if isinstance(stmt, ast.AssignLocal) and isinstance(stmt.value, ast.Call):
-            call = stmt.value
-            if isinstance(call.func, ast.FQNConst):
-                irtag = self.ctx.vm.get_irtag(call.func.fqn)
-                if irtag.tag == "mlir.asm" and "asm" in irtag.data:
-                    return self._emit_mlir_stmt(stmts, i, stmt, call, irtag)
-        if isinstance(stmt, ast.StmtExpr) and isinstance(stmt.value, ast.Call):
-            call = stmt.value
-            if isinstance(call.func, ast.FQNConst):
-                irtag = self.ctx.vm.get_irtag(call.func.fqn)
-                if irtag.tag == "mlir.asm" and "asm" in irtag.data:
-                    return self._emit_mlir_stmt(stmts, i, None, call, irtag)
-        self.emit_stmt(stmt)
-        return i + 1
+    def _is_mlir_asm_call(self, expr: ast.Expr) -> "IRTag | None":
+        if not isinstance(expr, ast.Call):
+            return None
+        if not isinstance(expr.func, ast.FQNConst):
+            return None
+        irtag = self.ctx.vm.get_irtag(expr.func.fqn)
+        if irtag.tag == "mlir.asm" and "asm" in irtag.data:
+            return irtag
+        return None
 
     def _emit_mlir_stmt(
         self,
-        stmts: list[ast.Stmt],
-        i: int,
-        stmt_or_none: "ast.AssignLocal | None",
+        loc: Loc,
+        target_name: "str | None",
         call: ast.Call,
         irtag: IRTag,
-    ) -> int:
+    ) -> None:
         asm = _escape_glair_asm(irtag.data["asm"])
         args_str = ", ".join(str(self.fmt_expr(arg)) for arg in call.args)
-        loc = stmts[i].loc
 
-        if stmt_or_none is None or call.w_T is TYPES.w_NoneType:
+        if target_name is None or call.w_T is TYPES.w_NoneType:
             self.emit_lineno_maybe(loc)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ();')
-            return i + 1
+            return
 
         w_restype = call.w_T
         assert w_restype is not None
@@ -211,18 +200,15 @@ class GlairFuncWriter:
         ):
             # multi-result: GLAIR has no multi-value type, so each result binds
             # directly to the per-field local declared in emit_local_vars.
-            intermediary = stmt_or_none.target.value
-            fields = self._multivalues_fanout[intermediary]
+            fields = self._multivalues_fanout[target_name]
             results_str = ", ".join(str(GLAIR_Ident(f)) for f in fields)
             self.emit_lineno_maybe(loc)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({results_str});')
-            return i + 1
+            return
 
-        else:
-            target = GLAIR_Ident(stmt_or_none.target.value)
-            self.emit_lineno_maybe(loc)
-            self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({target});')
-            return i + 1
+        target = GLAIR_Ident(target_name)
+        self.emit_lineno_maybe(loc)
+        self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({target});')
 
     def emit_lineno_maybe(self, loc: Loc) -> None:
         if loc.line_start != self.last_emitted_lineno:
@@ -285,11 +271,16 @@ class GlairFuncWriter:
 
     def emit_stmt_AssignLocal(self, assign: ast.AssignLocal) -> None:
         target = assign.target.value
+        irtag = self._is_mlir_asm_call(assign.value)
+        if irtag is not None:
+            assert isinstance(assign.value, ast.Call)
+            self._emit_mlir_stmt(assign.loc, target, assign.value, irtag)
+            return
         if target in self._multivalues_fanout:
             # GLAIR has no multi-value type: a multivalues-typed local
             # assignment must fan out into per-field copies. The RHS must
             # itself be a multivalues local (the only way to produce one
-            # outside an mlir.asm call, which is handled in _emit_mlir_stmt).
+            # outside an mlir.asm call, which is handled above).
             assert isinstance(assign.value, ast.NameLocalDirect)
             src_name = assign.value.sym.name
             src_fields = self._multivalues_fanout[src_name]
@@ -332,6 +323,11 @@ class GlairFuncWriter:
             self.tb.wl("}")
 
     def emit_stmt_StmtExpr(self, stmt: ast.StmtExpr) -> None:
+        irtag = self._is_mlir_asm_call(stmt.value)
+        if irtag is not None:
+            assert isinstance(stmt.value, ast.Call)
+            self._emit_mlir_stmt(stmt.loc, None, stmt.value, irtag)
+            return
         v = self.fmt_expr(stmt.value)
         if v is C.Void():
             pass

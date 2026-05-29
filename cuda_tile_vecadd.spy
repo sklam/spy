@@ -79,5 +79,38 @@ def exported() -> None:
         store_view_tko(added, pviewA, blockidxs._field0, token)
 
 
+
+    def export_vecadd_loop(a: TilePtrF64, size: TileI32, stride: TileI32, loopcount: i32) -> None:
+        # Argument preparation
+        #     %0 = "cuda_tile.assume"(%arg0) <{predicate = #cuda_tile.div_by<16>}> : (!cuda_tile.tile<ptr<f64>>) -> !cuda_tile.tile<ptr<f64>>
+        a = assume_div_by(a)
+        #     %1 = "cuda_tile.assume"(%arg1) <{predicate = #cuda_tile.bounded<0, ?>}> : (!cuda_tile.tile<i32>) -> !cuda_tile.tile<i32>
+        size = assume_bound(size)
+        #     %2 = "cuda_tile.assume"(%arg2) <{predicate = #cuda_tile.bounded<0, ?>}> : (!cuda_tile.tile<i32>) -> !cuda_tile.tile<i32>
+        stride = assume_bound(stride)
+        #     %3 = "cuda_tile.make_tensor_view"(%0, %1) <{operandSegmentSizes = array<i32: 1, 1, 0>}> : (!cuda_tile.tile<ptr<f64>>, !cuda_tile.tile<i32>) -> !cuda_tile.tensor_view<?xf64, strides=[1]>
+        tensorA = make_tensor_view(a, size)
+
+        # Operations
+        #     %12 = "cuda_tile.make_token"() : () -> !cuda_tile.token
+        token = make_token()
+        #     %13:3 = "cuda_tile.get_tile_block_id"() : () -> (!cuda_tile.tile<i32>, !cuda_tile.tile<i32>, !cuda_tile.tile<i32>)
+        blockidxs = get_tile_block_id()
+        #     %14 = "cuda_tile.make_partition_view"(%3) : (!cuda_tile.tensor_view<?xf64, strides=[1]>) -> !cuda_tile.partition_view<tile=(16), tensor_view<?xf64, strides=[1]>>
+        pviewA = make_partition_view(tensorA)
+        #     %15:2 = "cuda_tile.load_view_tko"(%14, %13#0, %12) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 1>}> : (!cuda_tile.partition_view<tile=(16), tensor_view<?xf64, strides=[1]>>, !cuda_tile.tile<i32>, !cuda_tile.token) -> (!cuda_tile.tile<16xf64>, !cuda_tile.token)
+        loadedA = load_view_tko(pviewA, blockidxs._field0, token)
+        total = loadedA._field0
+        value = loadedA._field0
+        i = 0
+        while i < loopcount:
+            # %18 = "cuda_tile.addf"(%15#0, %17#0) <{rounding_mode = #cuda_tile.rounding<nearest_even>}> : (!cuda_tile.tile<16xf64>, !cuda_tile.tile<16xf64>) -> !cuda_tile.tile<16xf64>
+            total = addf(total, value)
+            i += 1
+
+        #     %20 = "cuda_tile.store_view_tko"(%18, %19, %13#0, %12) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 1, 1>}> : (!cuda_tile.tile<16xf64>, !cuda_tile.partition_view<tile=(16), tensor_view<?xf64, strides=[1]>>, !cuda_tile.tile<i32>, !cuda_tile.token) -> !cuda_tile.token
+        store_view_tko(total, pviewA, blockidxs._field0, token)
+
+
 _ = exported()
 

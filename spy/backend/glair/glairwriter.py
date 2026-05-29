@@ -15,6 +15,7 @@ from spy.vm.function import W_ASTFunc, W_Func
 from spy.vm.irtag import IRTag
 from spy.vm.modules.posix import W__FILE
 from spy.vm.modules.unsafe.ptr import W_Ptr
+from spy.vm.object import W_Type
 from spy.vm.struct import W_StructType
 
 if TYPE_CHECKING:
@@ -107,10 +108,16 @@ class GlairFuncWriter:
         self.tb = gmodw.tb_content
         self.fqn = fqn
         self.last_emitted_lineno = -1
-        self._unused_result_counter = 0
 
         assert w_func.lowering_stage == "linearize"
         self.w_func = w_func
+        # GLAIR has no multi-value type: a SPy multivalues intermediary expands
+        # into one independent local per field. Map each multivalues local to
+        # its fanned-out fields so getfield reads, copy-assignments, and the
+        # producing mlir op all agree on the same names.
+        self._multivalues_fanout: dict[str, list[str]] = {}
+        self._multivalues_field_types: dict[str, list[W_Type]] = {}
+        self._collect_multivalues()
 
     def emit(self) -> None:
         self.emit_local_vars()
@@ -125,6 +132,17 @@ class GlairFuncWriter:
             msg = "reached the end of the function without a `return`"
             self.tb.wl(f"abort(); // {msg}")
 
+    def _collect_multivalues(self) -> None:
+        assert self.w_func.locals_types_w is not None
+        for varname, w_T in self.w_func.locals_types_w.items():
+            irtag = self.ctx.vm.get_irtag(w_T.fqn)
+            if irtag.tag == "mlir.type" and irtag.data["spelling"] == "multivalues":
+                members_w = list(w_T.members_w)  # type: ignore[attr-defined]
+                self._multivalues_fanout[varname] = [
+                    f"{varname}$f{i}" for i in range(len(members_w))
+                ]
+                self._multivalues_field_types[varname] = members_w
+
     def emit_local_vars(self) -> None:
         assert self.w_func.locals_types_w is not None
         param_names = [arg.name for arg in self.w_func.funcdef.args]
@@ -136,10 +154,16 @@ class GlairFuncWriter:
                 continue
             if varname in param_names:
                 continue
+            if varname in self._multivalues_fanout:
+                # GLAIR has no multi-value type: declare one local per field
+                # instead of declaring the multivalues intermediary itself.
+                fields = self._multivalues_fanout[varname]
+                types = self._multivalues_field_types[varname]
+                for fname, w_fT in zip(fields, types):
+                    c_ftype = self.ctx.w2c(w_fT)
+                    self.tb.wl(f"let {GLAIR_Ident(fname)}: {c_ftype};")
+                continue
             glair_varname = GLAIR_Ident(varname)
-            irtag = self.ctx.vm.get_irtag(w_T.fqn)
-            if irtag.tag == "mlir.type" and irtag.data["spelling"] == "multivalues":
-                continue  # ephemeral intermediary, suppressed
             c_type = self.ctx.w2c(w_T)
             self.tb.wl(f"let {glair_varname}: {c_type};")
 
@@ -185,50 +209,14 @@ class GlairFuncWriter:
             res_irtag.tag == "mlir.type"
             and res_irtag.data.get("spelling") == "multivalues"
         ):
-            # multi-result: every result must be bound in GLAIR's `-> (...)` list,
-            # even if the SPy program never reads it. Consume subsequent
-            # struct.getfield accesses on the intermediary to recover the
-            # user-visible names; fill any unused slot with a fresh placeholder.
-            members_w = w_restype.members_w  # type: ignore[attr-defined]
-            n = len(members_w)
-            slots: list[GLAIR_Ident | None] = [None] * n
+            # multi-result: GLAIR has no multi-value type, so each result binds
+            # directly to the per-field local declared in emit_local_vars.
             intermediary = stmt_or_none.target.value
-            j = i + 1
-            while j < len(stmts):
-                ns = stmts[j]
-                if (
-                    isinstance(ns, ast.AssignLocal)
-                    and isinstance(ns.value, ast.Call)
-                    and isinstance(ns.value.func, ast.FQNConst)
-                ):
-                    ns_irtag = self.ctx.vm.get_irtag(ns.value.func.fqn)
-                    if ns_irtag.tag == "struct.getfield":
-                        struct_arg = ns.value.args[0]
-                        if (
-                            isinstance(struct_arg, ast.NameLocalDirect)
-                            and struct_arg.sym.name == intermediary
-                        ):
-                            field_name = ns_irtag.data["name"]
-                            assert field_name.startswith("_field")
-                            idx = int(field_name[len("_field") :])
-                            slots[idx] = GLAIR_Ident(ns.target.value)
-                            j += 1
-                            continue
-                break
+            fields = self._multivalues_fanout[intermediary]
+            results_str = ", ".join(str(GLAIR_Ident(f)) for f in fields)
             self.emit_lineno_maybe(loc)
-            results = []
-            for idx, slot in enumerate(slots):
-                if slot is None:
-                    placeholder = f"$unused{self._unused_result_counter}"
-                    self._unused_result_counter += 1
-                    c_type = self.ctx.w2c(members_w[idx])
-                    self.tb.wl(f"let {placeholder}: {c_type};")
-                    results.append(GLAIR_Ident(placeholder))
-                else:
-                    results.append(slot)
-            results_str = ", ".join(str(r) for r in results)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({results_str});')
-            return j
+            return i + 1
 
         else:
             target = GLAIR_Ident(stmt_or_none.target.value)
@@ -297,6 +285,18 @@ class GlairFuncWriter:
 
     def emit_stmt_AssignLocal(self, assign: ast.AssignLocal) -> None:
         target = assign.target.value
+        if target in self._multivalues_fanout:
+            # GLAIR has no multi-value type: a multivalues-typed local
+            # assignment must fan out into per-field copies. The RHS must
+            # itself be a multivalues local (the only way to produce one
+            # outside an mlir.asm call, which is handled in _emit_mlir_stmt).
+            assert isinstance(assign.value, ast.NameLocalDirect)
+            src_name = assign.value.sym.name
+            src_fields = self._multivalues_fanout[src_name]
+            dst_fields = self._multivalues_fanout[target]
+            for dst, src in zip(dst_fields, src_fields):
+                self.tb.wl(f"{GLAIR_Ident(dst)} = {GLAIR_Ident(src)};")
+            return
         v = self.fmt_expr(assign.value)
         glair_varname = GLAIR_Ident(target)
         if assign.value.w_T is TYPES.w_NoneType:
@@ -651,8 +651,15 @@ class GlairFuncWriter:
 
     def fmt_struct_getfield(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:
         assert len(call.args) == 1
-        c_struct = self.fmt_expr(call.args[0])
+        arg = call.args[0]
         name = irtag.data["name"]
+        if isinstance(arg, ast.NameLocalDirect):
+            fields = self._multivalues_fanout.get(arg.sym.name)
+            if fields is not None:
+                assert name.startswith("_field")
+                idx = int(name[len("_field") :])
+                return C.Literal(str(GLAIR_Ident(fields[idx])))
+        c_struct = self.fmt_expr(arg)
         return C.Dot(c_struct, name)
 
     def fmt_ptr_getfield(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:

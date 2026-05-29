@@ -101,6 +101,7 @@ class GlairFuncWriter:
         self.tb = gmodw.tb_content
         self.fqn = fqn
         self.last_emitted_lineno = -1
+        self._unused_result_counter = 0
 
         assert w_func.lowering_stage == "linearize"
         self.w_func = w_func
@@ -178,9 +179,14 @@ class GlairFuncWriter:
             res_irtag.tag == "mlir.type"
             and res_irtag.data.get("spelling") == "multivalues"
         ):
-            # multi-result: consume subsequent struct.getfield accesses on the intermediary
+            # multi-result: every result must be bound in GLAIR's `-> (...)` list,
+            # even if the SPy program never reads it. Consume subsequent
+            # struct.getfield accesses on the intermediary to recover the
+            # user-visible names; fill any unused slot with a fresh placeholder.
+            members_w = w_restype.members_w  # type: ignore[attr-defined]
+            n = len(members_w)
+            slots: list[GLAIR_Ident | None] = [None] * n
             intermediary = stmt_or_none.target.value
-            results = []
             j = i + 1
             while j < len(stmts):
                 ns = stmts[j]
@@ -196,12 +202,25 @@ class GlairFuncWriter:
                             isinstance(struct_arg, ast.NameLocalDirect)
                             and struct_arg.sym.name == intermediary
                         ):
-                            results.append(GLAIR_Ident(ns.target.value))
+                            field_name = ns_irtag.data["name"]
+                            assert field_name.startswith("_field")
+                            idx = int(field_name[len("_field") :])
+                            slots[idx] = GLAIR_Ident(ns.target.value)
                             j += 1
                             continue
                 break
-            results_str = ", ".join(str(r) for r in results)
             self.emit_lineno_maybe(loc)
+            results = []
+            for idx, slot in enumerate(slots):
+                if slot is None:
+                    placeholder = f"$unused{self._unused_result_counter}"
+                    self._unused_result_counter += 1
+                    c_type = self.ctx.w2c(members_w[idx])
+                    self.tb.wl(f"let {placeholder}: {c_type};")
+                    results.append(GLAIR_Ident(placeholder))
+                else:
+                    results.append(slot)
+            results_str = ", ".join(str(r) for r in results)
             self.tb.wl(f'mlir "{asm}" ({args_str}) -> ({results_str});')
             return j
 

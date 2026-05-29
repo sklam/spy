@@ -54,6 +54,12 @@ def _fmt_float_body(val: float) -> str:
     return s
 
 
+def _escape_glair_asm(asm: str) -> str:
+    # MLIR asm strings can carry backslash sequences (e.g. `\0A`) and embedded
+    # quotes that must survive verbatim through the GLAIR lexer's string parsing.
+    return asm.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _glair_string_literal(b: bytes) -> str:
     """
     Format bytes as a GLAIR string literal (double-quoted).
@@ -162,7 +168,7 @@ class GlairFuncWriter:
         call: ast.Call,
         irtag: IRTag,
     ) -> int:
-        asm = irtag.data["asm"]
+        asm = _escape_glair_asm(irtag.data["asm"])
         args_str = ", ".join(str(self.fmt_expr(arg)) for arg in call.args)
         loc = stmts[i].loc
 

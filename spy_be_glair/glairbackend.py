@@ -1,12 +1,10 @@
 import py.path
 
-from spy.backend.glair.glairmodwriter import GlairModule, GlairModuleWriter
-from spy.backend.glair.glairstructwriter import GlairStructDefs, GlairStructWriter
 from spy.highlight import highlight_src
-from spy.vm.modules.unsafe.ptr import W_MemLocType
 from spy.vm.object import W_Type
-from spy.vm.struct import W_StructType
 from spy.vm.vm import SPyVM
+from spy_be_glair.glairmodwriter import GlairModule, GlairModuleWriter
+from spy_be_glair.glairstructwriter import GlairStructDefs, GlairStructWriter
 
 
 class GlairBackend:

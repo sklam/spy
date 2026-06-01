@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 
 from spy import ast
 from spy.backend.c import c_ast as C
-from spy.backend.glair.context import Context, GLAIR_Ident
 from spy.errors import SPyError
 from spy.fqn import FQN
 from spy.location import Loc
@@ -17,9 +16,11 @@ from spy.vm.modules.posix import W__FILE
 from spy.vm.modules.unsafe.ptr import W_Ptr
 from spy.vm.object import W_Type
 from spy.vm.struct import W_StructType
+from spy_be_glair.context import Context, GLAIR_Ident
 
 if TYPE_CHECKING:
-    from spy.backend.glair.glairmodwriter import GlairModuleWriter
+    from spy_be_glair.glairmodwriter import GlairModuleWriter
+
 
 # Mapping from W_Type to GLAIR integer/float literal suffixes
 _SUFFIX_MAP = {

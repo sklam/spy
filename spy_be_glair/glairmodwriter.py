@@ -3,8 +3,6 @@ from dataclasses import dataclass
 
 import py.path
 
-from spy.backend.c.context import C_Type
-from spy.backend.glair.context import Context, glair_func_decl
 from spy.errors import WIP
 from spy.fqn import FQN
 from spy.textbuilder import TextBuilder
@@ -15,6 +13,7 @@ from spy.vm.modules.unsafe.ptr import W_Ptr, W_PtrType
 from spy.vm.object import W_Object
 from spy.vm.primitive import W_I32
 from spy.vm.vm import SPyVM
+from spy_be_glair.context import Context, glair_func_decl
 
 
 @dataclass
@@ -123,7 +122,7 @@ class GlairModuleWriter:
             raise NotImplementedError("WIP")
 
     def _emit_func(self, fqn: FQN, w_func: W_ASTFunc) -> None:
-        from spy.backend.glair.glairwriter import GlairFuncWriter
+        from spy_be_glair.glairwriter import GlairFuncWriter
 
         c_func = self.ctx.c_function(fqn.c_name, w_func)
 

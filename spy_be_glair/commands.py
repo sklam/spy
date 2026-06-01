@@ -8,7 +8,6 @@ from typing import (
 from typer import Option
 
 from spy.analyze.importing import ImportAnalyzer
-from spy.backend.glair.glairbackend import GlairBackend
 from spy.cli._runners import init_vm
 from spy.cli.commands.build import get_build_dir
 from spy.cli.commands.shared_args import (
@@ -44,11 +43,13 @@ async def glair(args: Glair_Args) -> None:
     """
     Generate GLAIR IR and optionally dump it to stdout
     """
+    from spy_be_glair.glairbackend import GlairBackend
+
     modname = args.filename.stem
     vm = await init_vm(args)
 
     # Install custom builtins here
-    import extra_spy_builtins
+    from spy_be_glair import extra_spy_builtins
 
     vm.make_module(extra_spy_builtins.MLIR)
 

@@ -3,13 +3,13 @@ from dataclasses import dataclass
 import py.path
 
 from spy.backend.c.context import C_Type
-from spy.backend.glair.context import Context
 from spy.fqn import FQN
 from spy.textbuilder import TextBuilder
 from spy.vm.modules.unsafe.ptr import W_PtrType, W_RefType
 from spy.vm.object import W_Type
 from spy.vm.struct import W_StructType
 from spy.vm.vm import SPyVM
+from spy_be_glair.context import Context
 
 
 @dataclass

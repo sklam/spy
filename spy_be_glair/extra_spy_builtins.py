@@ -1,10 +1,5 @@
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from mlir_utils import (
-    create_mlir_type_fqn,
-    encode_asm_operation,
-    parse_composite_type,
-)
 from spy.fqn import FQN
 from spy.vm.b import TYPES, B
 from spy.vm.field import W_Field
@@ -28,6 +23,12 @@ from spy.vm.opspec import W_MetaArg, W_OpSpec
 from spy.vm.registry import ModuleRegistry
 from spy.vm.str import W_Str
 from spy.vm.struct import W_Struct, W_StructField, W_StructType, calc_layout
+
+from .mlir_utils import (
+    create_mlir_type_fqn,
+    encode_asm_operation,
+    parse_composite_type,
+)
 
 if TYPE_CHECKING:
     from spy.vm.vm import SPyVM

@@ -125,12 +125,15 @@ class GlairModuleWriter:
         from spy_be_glair.glairwriter import GlairFuncWriter
 
         c_func = self.ctx.c_function(fqn.c_name, w_func)
-
         # Emit @loc annotation before the function declaration
         if self.glair_mod.spyfile is not None:
             spyline = w_func.funcdef.loc.line_start
             spyfile = str(self.glair_mod.spyfile)
             self.tb_content.wl(f'@loc("{spyfile}", {spyline})')
+        # Emit @ffi
+        tags = self.ctx.vm.get_irtag(fqn)
+        if tags.tag == "glair" and tags.data.get("export_ffi_c", False):
+            self.tb_content.wl(f'@ffi("c")')
 
         self.tb_content.wl(glair_func_decl(c_func) + " {")
         with self.tb_content.indent():

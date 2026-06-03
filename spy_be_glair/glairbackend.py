@@ -1,6 +1,7 @@
 import py.path
 
 from spy.highlight import highlight_src
+from spy.vm.modules.unsafe.ptr import W_MemLocType
 from spy.vm.object import W_Type
 from spy.vm.vm import SPyVM
 from spy_be_glair.glairmodwriter import GlairModule, GlairModuleWriter
@@ -73,7 +74,14 @@ class GlairBackend:
             w_mod = self.vm.modules_w[modname]
             if isinstance(w_obj, W_Type):
                 irtag = self.vm.get_irtag(fqn)
-                if w_mod.filepath is None and irtag.tag != "mlir.type":
+                # Builtin-module types are normally skipped, but ptr/ref types
+                # (W_MemLocType) need explicit ptr_wrapper/ref_alias decls in
+                # spy_structdefs.glair so the GLAIR backend can lower them.
+                # mlir.type newtypes are also kept (used inline at use sites).
+                if w_mod.filepath is None and not (
+                    irtag.tag == "mlir.type"
+                    or isinstance(w_obj, W_MemLocType)
+                ):
                     continue
                 self.glair_structdefs["globals"].content.append((fqn, w_obj))
             elif w_mod.filepath is not None:

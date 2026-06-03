@@ -53,6 +53,9 @@ async def glair(args: Glair_Args) -> None:
 
     vm.make_module(extra_spy_builtins.MLIR)
 
+    # Make backend-specific spy modules (e.g. _prange) importable.
+    vm.path.append(str(Path(__file__).parent / "stdlib"))
+
     importer = ImportAnalyzer(vm, modname, use_spyc=not args.no_spyc)
     importer.parse_all()
     importer.import_all()

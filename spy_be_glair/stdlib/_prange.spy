@@ -1,0 +1,59 @@
+from operator import OpSpec, MetaArg
+
+
+# `prange` mirrors `range` from stdlib/_range.spy verbatim. The GLAIR backend
+# detects the prange iter-method names and emits scf.parallel instead of scf.for.
+# Iterations are asserted independent: data races are undefined behaviour.
+@struct
+class prange:
+    start: int
+    stop: int
+    step: int
+
+    @blue.metafunc
+    def __new__(m_cls, *args_m):
+        def impl1(n: int) -> prange:
+            return prange.__make__(0, n, 1)
+
+        def impl2(a: int, b: int) -> prange:
+            return prange.__make__(a, b, 1)
+
+        def impl3(a: int, b: int, c: int) -> prange:
+            return prange.__make__(a, b, c)
+
+        m0: MetaArg
+        m1: MetaArg
+        m2: MetaArg
+        if len(args_m) == 1:
+            (m0,) = args_m
+            return OpSpec(impl1, [m0])
+        elif len(args_m) == 2:
+            m0, m1 = args_m
+            return OpSpec(impl2, [m0, m1])
+        elif len(args_m) == 3:
+            m0, m1, m2 = args_m
+            return OpSpec(impl3, [m0, m1, m2])
+        else:
+            return OpSpec.NULL
+
+    def __fastiter__(self) -> prange_iterator:
+        return prange_iterator(self.start, self.stop, self.step)
+
+
+@struct
+class prange_iterator:
+    i: int
+    stop: int
+    step: int
+
+    def __next__(self) -> prange_iterator:
+        return prange_iterator(self.i + self.step, self.stop, self.step)
+
+    def __item__(self) -> int:
+        return self.i
+
+    def __continue_iteration__(self) -> bool:
+        if self.step > 0:
+            return self.i < self.stop
+        else:
+            return self.i > self.stop

@@ -634,7 +634,26 @@ class GlairFuncWriter:
             # Remove the trailing W_Loc argument (GLAIR has @loc annotations instead)
             assert isinstance(call.args[-1], ast.LocConst)
             call.args.pop()
-            return self.fmt_generic_call(fqn, call)
+            # GLAIR §3.3: ptr_wrapper ops are *implicitly* declared as
+            # `<wrapper>_load` / `<wrapper>_store` (underscore separator).
+            # Rewrite SPy's `$store` / `$getitem_byval` / `$getitem_byref`
+            # suffix to the canonical GLAIR form and bypass fmt_generic_call
+            # so we don't emit a spurious `@builtin extern fn` decl.
+            c_name = fqn.c_name
+            if irtag.tag == "ptr.store":
+                assert c_name.endswith("$store")
+                c_name = c_name[: -len("$store")] + "_store"
+            else:
+                for suffix in ("$getitem_byval", "$getitem_byref"):
+                    if c_name.endswith(suffix):
+                        c_name = c_name[: -len(suffix)] + "_load"
+                        break
+                else:
+                    raise AssertionError(
+                        f"unexpected ptr.getitem fqn: {fqn.c_name!r}"
+                    )
+            c_args = [self.fmt_expr(arg) for arg in call.args]
+            return C.Call(c_name, c_args)
 
         elif irtag.tag == "mlir.asm" and "asm" in irtag.data:
             raise SPyError.simple(

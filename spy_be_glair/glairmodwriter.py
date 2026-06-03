@@ -177,7 +177,20 @@ class GlairModuleWriter:
         irtag = self.ctx.vm.get_irtag(fqn)
         if irtag.tag == "mlir.asm":
             return  # inlined as mlir statement, no extern fn needed
-        elif irtag.tag == "mlir.op":
+        # GLAIR §3.3: ptr_wrapper ops are implicitly declared by the
+        # `ptr_wrapper` decl itself.  Emitting an extern fn would shadow
+        # the GLAIR backend's inline lowering.  Suppress for all ptr.*
+        # IRTags — the call sites either inline the value (deref/getfield/
+        # setfield) or emit the canonical `<wrapper>_load/_store` name.
+        if irtag.tag in (
+            "ptr.store",
+            "ptr.getitem",
+            "ptr.deref",
+            "ptr.getfield",
+            "ptr.setfield",
+        ):
+            return
+        if irtag.tag == "mlir.op":
             self.tb_externs.wl(f'@mlir_op("{irtag.data["opname"]}")')
         else:
             self.tb_externs.wl("@builtin")

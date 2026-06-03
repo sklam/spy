@@ -621,7 +621,14 @@ class GlairFuncWriter:
             return self.fmt_ptr_setfield(fqn, call)
 
         elif irtag.tag == "ptr.deref":
-            return self.fmt_generic_call(fqn, call)
+            # Per GLAIR §6.7, "*expr" is the canonical whole-value load through
+            # a raw pointer.  A raw_ref[T] / raw_ptr[T] is a ptr_wrapper around
+            # *T whose inner pointer is the `.p` field (§3.3, §6.6), so the
+            # full deref spelling is `*ref.p`.  Inlining here avoids emitting
+            # an undefined `<Wrapper>$deref` extern.
+            assert len(call.args) == 1
+            c_ref = self.fmt_expr(call.args[0])
+            return C.Literal(f"*{c_ref}.p")
 
         elif irtag.tag in ("ptr.getitem", "ptr.store"):
             # Remove the trailing W_Loc argument (GLAIR has @loc annotations instead)

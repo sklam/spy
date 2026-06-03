@@ -22,7 +22,7 @@ def exported() -> None:
     offset = MLIR_op_builder("cuda_tile.offset").args(Tile128xPtrF64, Tile128xI32).result(Tile128xPtrF64)
     load_ptr_tko = MLIR_op_builder("cuda_tile.load_ptr_tko {memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 0, 0, 0>}").args(Tile128xPtrF64).result(Tile128xF64, Token)
 
-    printfn = MLIR_op_builder(r'cuda_tile.print {str="Data: %f\0A"}').args(Tile128xF64).result()
+    printfn = MLIR_op_builder(r'cuda_tile.print_tko {str="Data: %f\0A", operandSegmentSizes = array<i32: 1, 0>}').args(Tile128xF64).result(Token)
 
     def export_foo(a: TilePtrF64) -> None:
         tid = iota()

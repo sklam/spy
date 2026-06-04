@@ -67,7 +67,7 @@ class W_MLIR_Type(W_StructType):
                 raise TypeError
 
         formatted_name = name.format(*map(fmt, w_argtypes))
-        fqn = vm.get_unique_FQN(create_mlir_type_fqn(formatted_name))
+        fqn = create_mlir_type_fqn(formatted_name)
 
         if fqn in _type_caches:
             return _type_caches[fqn]

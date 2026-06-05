@@ -343,6 +343,25 @@ def w_export_ffi_c(
         defaults_w=fn.defaults_w,
         lowering_stage=fn.lowering_stage,
     )
-    irtag = IRTag("glair", **{"export_ffi_c": True})
+    irtag = IRTag("glair", **{"export_ffi": "c"})
+    vm.add_global(newfn.fqn, newfn, irtag=irtag)
+    return newfn
+
+
+@MLIR.builtin_func("export_ffi_cuda_tile", color="blue")
+def w_export_ffi_cuda_tile(
+    vm: "SPyVM",
+    fn: W_ASTFunc,
+) -> W_ASTFunc:
+    newfn = W_ASTFunc(
+        w_functype=fn.w_functype,
+        fqn=fn.fqn.with_suffix("cffi"),
+        funcdef=fn.funcdef,
+        closure=fn.closure,
+        locals_types_w=fn.locals_types_w,
+        defaults_w=fn.defaults_w,
+        lowering_stage=fn.lowering_stage,
+    )
+    irtag = IRTag("glair", **{"export_ffi": "cuda-tile"})
     vm.add_global(newfn.fqn, newfn, irtag=irtag)
     return newfn

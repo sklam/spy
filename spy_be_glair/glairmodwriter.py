@@ -132,8 +132,8 @@ class GlairModuleWriter:
             self.tb_content.wl(f'@loc("{spyfile}", {spyline})')
         # Emit @ffi
         tags = self.ctx.vm.get_irtag(fqn)
-        if tags.tag == "glair" and tags.data.get("export_ffi_c", False):
-            self.tb_content.wl(f'@ffi("c")')
+        if tags.tag == "glair" and (abi := tags.data.get("export_ffi")):
+            self.tb_content.wl(f'@ffi("{abi}")')
 
         self.tb_content.wl(glair_func_decl(c_func) + " {")
         with self.tb_content.indent():

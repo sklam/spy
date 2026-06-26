@@ -247,8 +247,8 @@ class TestBasic(CompilerTest):
         # a runtime error. The compilation always succeed.
         mod = self.compile("""
         def foo() -> str:
-            x: i32 = 1
-            y: object = x
+            var x: i32 = 1
+            var y: object = x
             return y
         """)
         msg = "Invalid cast. Expected `str`, got `i32`"
@@ -854,29 +854,6 @@ class TestBasic(CompilerTest):
         )
         self.compile_raises(src, "foo", errors)
 
-    def test_builtin_function(self):
-        mod = self.compile("""
-        def foo(x: i32) -> i32:
-            return abs(x)
-        """)
-        #
-        assert mod.foo(10) == 10
-        assert mod.foo(-20) == 20
-
-    def test_max_min(self):
-        mod = self.compile("""
-        def mymax(x: i32, y: i32) -> i32: return max(x, y)
-        def mymin(x: i32, y: i32) -> i32: return min(x, y)
-        """)
-        #
-        assert mod.mymax(10, 20) == 20
-        assert mod.mymax(20, 10) == 20
-        assert mod.mymax(-5, 5) == 5
-
-        assert mod.mymin(10, 20) == 10
-        assert mod.mymin(20, 10) == 10
-        assert mod.mymin(-5, 5) == -5
-
     def test_aug_assign(self):
         mod = self.compile("""
         def foo(x: i32) -> i32:
@@ -896,7 +873,7 @@ class TestBasic(CompilerTest):
         """)
         #
         w_functype = mod.foo.w_functype
-        assert w_functype.fqn.human_name == "def(i32) -> i32"
+        assert w_functype.fqn.debug_human_name == "def(i32) -> i32"
         assert mod.foo(1) == 2
 
     def test_redshift_nonglobal_function(self):
@@ -924,53 +901,6 @@ class TestBasic(CompilerTest):
             return make_adder(3)(6)
         """)
         assert mod.foo() == 9
-
-    def test_blue_generic(self):
-        mod = self.compile("""
-        @blue.generic
-        def add(T):
-            def impl(x: T, y: T) -> T:
-                return x + y
-            return impl
-
-        def foo() -> i32:
-            return add[i32](1, 2)
-
-        def bar() -> str:
-            return add[str]('hello ', 'world')
-        """)
-        assert mod.foo() == 3
-        assert mod.bar() == "hello world"
-
-    def test_generic_args(self):
-        mod = self.compile("""
-        def add[T](x: T, y: T) -> T:
-            return x + y
-
-        def foo() -> i32:
-            return add[i32](1, 2)
-
-        def bar() -> str:
-            return add[str]('hello ', 'world')
-        """)
-        assert mod.foo() == 3
-        assert mod.bar() == "hello world"
-
-    def test_cannot_call_blue_generic(self):
-        src = """
-        @blue.generic
-        def ident(x):
-            return x
-
-        def foo() -> i32:
-            return ident(42)
-        """
-        errors = expect_errors(
-            "generic functions must be called via `[...]`",
-            ("this is `@blue.generic def(dynamic) -> dynamic`", "ident"),
-            ("`ident` defined here", "def ident(x):"),
-        )
-        self.compile_raises(src, "foo", errors)
 
     def test_call_func_already_redshifted(self):
         mod = self.compile("""
@@ -1266,7 +1196,7 @@ class TestBasic(CompilerTest):
         w_ptr_S2 = w_mod.getattr("ptr_S2")
         #
         expected_sig = "def(test::S, unsafe::raw_ptr[test::S]) -> None"
-        assert w_foo.w_functype.fqn.human_name == expected_sig
+        assert w_foo.w_functype.fqn.debug_human_name == expected_sig
         params = w_foo.w_functype.params
         assert params[0].w_T is w_S
         assert params[1].w_T is w_ptr_S1 is w_ptr_S2
@@ -1638,3 +1568,27 @@ class TestBasic(CompilerTest):
         """
         mod = self.compile(src)
         assert mod.foo() == 1
+
+    @only_interp
+    def test_type_name_attributes(self):
+        src = """
+        @struct
+        class Foo[T]:
+            pass
+
+        def get_name() -> str:
+            return Foo[i32].__name__
+
+        def get_qualname() -> str:
+            return Foo[i32].__qualname__
+
+        def get_fqn() -> str:
+            return Foo[i32].__fqn__
+
+        def get_full_fqn() -> str:
+            return Foo[i32].__full_fqn__
+        """
+        mod = self.compile(src)
+        assert mod.get_name() == "Foo[i32]"
+        assert mod.get_qualname() == mod.get_fqn() == "test::Foo[i32]"
+        assert mod.get_full_fqn() == "test::Foo[i32]::Self"

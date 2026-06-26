@@ -53,7 +53,9 @@ class ScopeAnalyzer:
 
     mod: ast.Module
     stack: list[SymTable]
-    inner_scopes: dict[ast.FuncDef | ast.GenericFuncDef | ast.ClassDef, SymTable]
+    inner_scopes: dict[
+        ast.FuncDef | ast.GenericFuncDef | ast.ClassDef | ast.GenericClassDef, SymTable
+    ]
     loop_depth: int
 
     def __init__(self, modname: str, mod: ast.Module) -> None:
@@ -91,6 +93,9 @@ class ScopeAnalyzer:
 
     def by_classdef(self, classdef: ast.ClassDef) -> SymTable:
         return self.inner_scopes[classdef]
+
+    def by_generic_classdef(self, gclassdef: ast.GenericClassDef) -> SymTable:
+        return self.inner_scopes[gclassdef]
 
     def pp(self) -> None:
         print("Implicit imports:")
@@ -356,6 +361,22 @@ class ScopeAnalyzer:
             self.declare(stmt)
         self.pop_scope()
 
+    def declare_GenericClassDef(self, gclassdef: ast.GenericClassDef) -> None:
+        # declare the name in the outer scope, just like declare_FuncDef does
+        loc = gclassdef.inner.loc
+        self.define_name(gclassdef.name, "const", "funcdef", loc, loc)
+
+        # outer scope: blue, contains only the generic args (T, ...) and Self
+        inner_scope = self.new_SymTable(gclassdef.name, "blue", "function")
+        self.push_scope(inner_scope)
+        self.inner_scopes[gclassdef] = inner_scope
+        for arg in gclassdef.args:
+            self.define_name(arg.name, "const", "blue-param", arg.loc, arg.type.loc)
+        self.define_name("Self", "const", "classdef", loc, loc)
+        self.define_name("@return", "var", "auto", loc, loc)
+        self.declare(gclassdef.inner)
+        self.pop_scope()
+
     def declare_Assign(self, assign: ast.Assign) -> None:
         self._declare_target_maybe(assign.target, assign.value)
         self.declare(assign.value)
@@ -373,7 +394,7 @@ class ScopeAnalyzer:
         self._declare_target_maybe(assignexpr.target, assignexpr.value)
         self.declare(assignexpr.value)
 
-    def _declare_target_maybe(self, target: ast.StrConst, value: ast.Expr) -> None:
+    def _declare_target_maybe(self, target: ast.StrLiteral, value: ast.Expr) -> None:
         # if target name does not exist elsewhere, we treat it as an implicit
         # declaration
         level, scope, sym = self.lookup_ref(target.value)
@@ -389,7 +410,7 @@ class ScopeAnalyzer:
             # possible second assignment: promote to var if needed
             self._promote_const_to_var_maybe(target)
 
-    def _promote_const_to_var_maybe(self, target: ast.StrConst) -> None:
+    def _promote_const_to_var_maybe(self, target: ast.StrLiteral) -> None:
         level, scope, sym = self.lookup_ref(target.value)
         if (
             sym
@@ -522,6 +543,15 @@ class ScopeAnalyzer:
         #
         classdef.symtable = inner_scope
 
+    def flatten_GenericClassDef(self, gclassdef: ast.GenericClassDef) -> None:
+        for arg in gclassdef.args:
+            self.flatten(arg)
+        inner_scope = self.by_generic_classdef(gclassdef)
+        self.push_scope(inner_scope)
+        self.flatten_ClassDef(gclassdef.inner)
+        self.pop_scope()
+        gclassdef.symtable = inner_scope
+
     def flatten_Name(self, name: ast.Name) -> None:
         self.capture_maybe(name.id)
 
@@ -549,6 +579,11 @@ class ScopeAnalyzer:
     def flatten_Tuple(self, tup: ast.Tuple) -> None:
         self.mod_scope.implicit_imports.add("_tuple")
         for item in tup.items:
+            self.flatten(item)
+
+    def flatten_Slice(self, slc: ast.Slice) -> None:
+        self.mod_scope.implicit_imports.add("_slice")
+        for item in (slc.start, slc.stop, slc.step):
             self.flatten(item)
 
     def flatten_UnpackAssign(self, unpack: ast.UnpackAssign) -> None:

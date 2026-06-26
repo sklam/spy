@@ -234,13 +234,13 @@ class TestSPyBackend(CompilerTest):
             add_f64(3.4, 5.6)
         """)
         self.assert_dump("""
-        add_i32 = `test::add[i32]::impl`
-        add_f64 = `test::add[f64]::impl`
+        add_i32 = `test::add[i32]`
+        add_f64 = `test::add[f64]`
 
-        def `test::add[i32]::impl`(x: i32, y: i32) -> i32:
+        def `test::add[i32]`(x: i32, y: i32) -> i32:
             return x + y
 
-        def `test::add[f64]::impl`(x: f64, y: f64) -> f64:
+        def `test::add[f64]`(x: f64, y: f64) -> f64:
             return x + y
 
         def foo() -> None:
@@ -313,6 +313,17 @@ class TestSPyBackend(CompilerTest):
         src = """
         def foo() -> None:
             x.foo = 42
+        """
+        self.compile(src)
+        self.assert_dump(src)
+
+    def test_prefixed_int_literal(self):
+        src = """
+        def foo() -> None:
+            i8(1)
+            u8(2)
+            i64(3)
+            u64(4)
         """
         self.compile(src)
         self.assert_dump(src)
@@ -430,4 +441,30 @@ class TestSPyBackend(CompilerTest):
         self.assert_dump("""
         def foo() -> i32:
             return __block__(x: i32 = 1; x)
+        """)
+
+    def test_typed_consts(self):
+        self.backend = "doppler"
+        src = """
+        def foo() -> None:
+            var a = i8(1)
+            var b = u8(1)
+            var c = i32(1)
+            var d = u32(1)
+            var e = i64(1)
+            var f = u64(1)
+            var g = f32(1.0)
+            var h = f64(1.0)
+        """
+        self.compile(src)
+        self.assert_dump("""
+        def foo() -> None:
+            a: i8 = i8(1)
+            b: u8 = u8(1)
+            c: i32 = 1
+            d: u32 = u32(1)
+            e: i64 = i64(1)
+            f: u64 = u64(1)
+            g: f32 = f32(1.0)
+            h: f64 = 1.0
         """)

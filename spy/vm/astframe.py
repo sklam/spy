@@ -1,6 +1,9 @@
 from contextlib import contextmanager
+from ctypes import c_float as float32
 from types import NoneType
 from typing import TYPE_CHECKING, Iterator, Optional, Sequence
+
+from fixedint import Int8, Int32, Int64, UInt8, UInt32, UInt64
 
 from spy import ast
 from spy.analyze.symtable import Color, Symbol, SymTable, maybe_blue
@@ -154,6 +157,7 @@ class AbstractFrame:
                 color = "blue"
             else:
                 color = "red"
+
         self.locals[name] = LocalVar(
             varname=name, decl_loc=loc, color=color, w_T=w_type, w_val=None
         )
@@ -163,7 +167,13 @@ class AbstractFrame:
             self.declare_local(name, "red", B.w_bool, Loc.fake())
 
     def store_local(self, name: str, w_value: W_Object) -> None:
-        self.locals[name].w_val = w_value
+        lv = self.locals[name]
+        # sanity check
+        if isinstance(w_value, W_Cell):
+            assert self.vm.isinstance(w_value.get(), lv.w_T)
+        else:
+            assert self.vm.isinstance(w_value, lv.w_T)
+        lv.w_val = w_value
 
     def load_local(self, name: str) -> W_Object:
         localvar = self.locals.get(name)
@@ -192,12 +202,12 @@ class AbstractFrame:
                 # no need to add extra info
                 pass
             elif varname == "@return":
-                exp = w_expT.fqn.human_name
+                exp = w_expT.fqn.human_name(self.vm)
                 msg = f"expected `{exp}` because of return type"
                 loc = self.symtable.lookup(varname).type_loc
                 err.add("note", msg, loc=loc)
             else:
-                exp = w_expT.fqn.human_name
+                exp = w_expT.fqn.human_name(self.vm)
                 msg = f"expected `{exp}` because of type declaration"
                 loc = self.symtable.lookup(varname).type_loc
                 err.add("note", msg, loc=loc)
@@ -243,7 +253,8 @@ class AbstractFrame:
             # special case None and allow to use it as a type even if it's not
             return TYPES.w_NoneType
         w_valtype = self.vm.dynamic_type(w_val)
-        msg = f"expected `type`, got `{w_valtype.fqn.human_name}`"
+        got = w_valtype.fqn.human_name(self.vm)
+        msg = f"expected `type`, got `{got}`"
         raise SPyError.simple("W_TypeError", msg, "expected `type`", expr.loc)
 
     # ==== statements ====
@@ -411,7 +422,12 @@ class AbstractFrame:
         if classdef.kind == "struct":
             return W_StructType
         else:
-            assert False, "only @struct and @typedef are supported for now"
+            raise SPyError.simple(
+                "W_WIP",
+                "only @struct classes are supported for now",
+                "class defined here",
+                classdef.loc,
+            )
 
     def fwdecl_ClassDef(self, classdef: ast.ClassDef) -> None:
         """
@@ -445,6 +461,49 @@ class AbstractFrame:
         # finalize type definition
         w_T.define_from_classbody(self.vm, body)
         assert w_T.is_defined()
+
+    def exec_stmt_GenericClassDef(self, gclassdef: ast.GenericClassDef) -> None:
+        """
+        Desugar generic argument syntax sugar:
+
+            @struct
+            class Point[T]:
+                x: T
+
+        into the equivalent of:
+
+            @blue.generic
+            def Point(T):
+                @struct
+                class Self:
+                    x: T
+                return Self
+        """
+        loc = gclassdef.loc
+        assert gclassdef.symtable is not None
+
+        # build synthetic return: return Self
+        impl_symbol = gclassdef.symtable.lookup("Self")
+        return_stmt = ast.Return(
+            loc=loc,
+            value=ast.NameLocalDirect(loc=loc, sym=impl_symbol),
+        )
+
+        outer_funcdef = ast.FuncDef(
+            loc=loc,
+            color="blue",
+            kind="generic",
+            name=gclassdef.name,
+            args=gclassdef.args,
+            return_type=ast.Auto(loc),
+            defaults=[],
+            docstring=None,
+            body=[gclassdef.inner, return_stmt],
+            decorators=[],
+            symtable=gclassdef.symtable,
+        )
+
+        self.exec_stmt_FuncDef(outer_funcdef)
 
     def exec_stmt_VarDef(self, vardef: ast.VarDef) -> None:
         # Possible cases:
@@ -501,7 +560,7 @@ class AbstractFrame:
         self.exec_stmt(specialized)
 
     def _specialize_assign_common(
-        self, loc: Loc, target: ast.StrConst, value: ast.Expr, expr: bool
+        self, loc: Loc, target: ast.StrLiteral, value: ast.Expr, expr: bool
     ) -> ast.AssignLocal | ast.AssignCell | ast.AssignExprLocal | ast.AssignExprCell:
         varname = target.value
         sym = self.symtable.lookup(varname)
@@ -568,7 +627,9 @@ class AbstractFrame:
     def exec_stmt_AssignLocal(self, assign: ast.AssignLocal) -> None:
         self._execute_AssignLocal(assign.target, assign.value)
 
-    def _execute_AssignLocal(self, target: ast.StrConst, value: ast.Expr) -> W_MetaArg:
+    def _execute_AssignLocal(
+        self, target: ast.StrLiteral, value: ast.Expr
+    ) -> W_MetaArg:
         varname = target.value
         lv = self.locals.get(varname)
         if lv is None:
@@ -587,7 +648,7 @@ class AbstractFrame:
         self._execute_AssignCell(assign.target, assign.target_fqn, assign.value)
 
     def _execute_AssignCell(
-        self, target: ast.StrConst, target_fqn: FQN, value: ast.Expr
+        self, target: ast.StrLiteral, target_fqn: FQN, value: ast.Expr
     ) -> W_MetaArg:
         wam = self.eval_expr(value)
         if not self.redshifting:
@@ -601,9 +662,9 @@ class AbstractFrame:
         w_T = wam_tup.w_static_T
 
         is_interp_tuple = w_T is SPY.w_interp_tuple
-        is_stdlib_tuple = w_T.fqn.match("_tuple::tuple[*]::_tup")
+        is_stdlib_tuple = self.vm.is_tuple_type(w_T)
         if not (is_interp_tuple or is_stdlib_tuple):
-            t = wam_tup.w_static_T.fqn.human_name
+            t = wam_tup.w_static_T.fqn.human_name(self.vm)
             err = SPyError(
                 "W_TypeError",
                 f"`{t}` does not support unpacking",
@@ -644,7 +705,7 @@ class AbstractFrame:
             expr = ast.GetItem(
                 loc=unpack.value.loc,
                 value=unpack.value,
-                args=[ast.Constant(loc=unpack.value.loc, value=i)],
+                args=[ast.Literal(loc=unpack.value.loc, value=i)],
             )
             # fabricate an ast.Assign
             # XXX: ideally we should cache the specialization instead of
@@ -749,7 +810,7 @@ class AbstractFrame:
         # way, 'continue' works out of the box.
         iter_name = f"_$iter{for_node.seq}"
         iter_sym = self.symtable.lookup(iter_name)
-        iter_target = ast.StrConst(for_node.loc, iter_name)
+        iter_target = ast.StrLiteral(for_node.loc, iter_name)
 
         # it = X.__fastiter__()
         init_iter = ast.Assign(
@@ -758,7 +819,7 @@ class AbstractFrame:
             value=ast.CallMethod(
                 loc=for_node.loc,
                 target=for_node.iter,
-                method=ast.StrConst(for_node.loc, "__fastiter__"),
+                method=ast.StrLiteral(for_node.loc, "__fastiter__"),
                 args=[],
             ),
         )
@@ -769,7 +830,7 @@ class AbstractFrame:
             value=ast.CallMethod(
                 loc=for_node.loc,
                 target=ast.NameLocalDirect(for_node.loc, iter_sym),
-                method=ast.StrConst(for_node.loc, "__item__"),
+                method=ast.StrLiteral(for_node.loc, "__item__"),
                 args=[],
             ),
         )
@@ -780,7 +841,7 @@ class AbstractFrame:
             value=ast.CallMethod(
                 loc=for_node.loc,
                 target=ast.NameLocalDirect(for_node.loc, iter_sym),
-                method=ast.StrConst(for_node.loc, "__next__"),
+                method=ast.StrLiteral(for_node.loc, "__next__"),
                 args=[],
             ),
         )
@@ -790,7 +851,7 @@ class AbstractFrame:
             test=ast.CallMethod(
                 loc=for_node.loc,
                 target=ast.NameLocalDirect(for_node.loc, iter_sym),
-                method=ast.StrConst(for_node.loc, "__continue_iteration__"),
+                method=ast.StrLiteral(for_node.loc, "__continue_iteration__"),
                 args=[],
             ),
             body=[assign_item, advance_iter] + for_node.body,
@@ -815,11 +876,8 @@ class AbstractFrame:
                     plain_msg = self.vm.unwrap_str(wam_msg.w_val)
                 else:
                     err = SPyError("W_TypeError", "mismatched types")
-                    err.add(
-                        "error",
-                        f"expected `str`, got `{wam_msg.w_static_T.fqn.human_name}`",
-                        loc=wam_msg.loc,
-                    )
+                    got = wam_msg.w_static_T.fqn.human_name(self.vm)
+                    err.add("error", f"expected `str`, got `{got}`", loc=wam_msg.loc)
                     raise err
 
             raise SPyError.simple(
@@ -839,22 +897,50 @@ class AbstractFrame:
             auto.loc,
         )
 
-    def eval_expr_Constant(self, const: ast.Constant) -> W_MetaArg:
+    def eval_expr_Const(self, const: ast.Const) -> W_MetaArg:
+        assert const.w_T is not None
+        return W_MetaArg(self.vm, "blue", const.w_T, const.w_val, const.loc)
+
+    def eval_expr_Literal(self, lit: ast.Literal) -> W_MetaArg:
         # unsupported literals are rejected directly by the parser, see
-        # Parser.from_py_expr_Constant
-        T = type(const.value)
-        assert T in (int, float, complex, bool, NoneType)
-        w_val = self.vm.wrap(const.value)
+        # Parser.from_py_expr_Literal
+        val = lit.value
+        T = type(val)
+        assert T in (
+            int,
+            float,
+            float32,
+            complex,
+            bool,
+            NoneType,
+            Int8,
+            UInt8,
+            Int32,
+            UInt32,
+            Int64,
+            UInt64,
+        )
+        if T is int and not (Int32.minval <= val <= Int32.maxval):  # type: ignore
+            # unprefixed int literals default to i32: let's raise a helpful error
+            # message if we are out of range.
+            raise SPyError.simple(
+                "W_ValueError",
+                f"integer literal {val} is out of range for i32; "
+                f"use i64({val}) or u64({val}) to get a 64-bit value",
+                "integer literal out of range",
+                lit.loc,
+            )
+        w_val = self.vm.wrap(val)
         w_T = self.vm.dynamic_type(w_val)
-        return W_MetaArg(self.vm, "blue", w_T, w_val, const.loc)
+        return W_MetaArg(self.vm, "blue", w_T, w_val, lit.loc)
 
-    def eval_expr_StrConst(self, const: ast.StrConst) -> W_MetaArg:
-        w_val = self.vm.wrap(const.value)
-        return W_MetaArg(self.vm, "blue", B.w_str, w_val, const.loc)
+    def eval_expr_StrLiteral(self, lit: ast.StrLiteral) -> W_MetaArg:
+        w_val = self.vm.wrap(lit.value)
+        return W_MetaArg(self.vm, "blue", B.w_str, w_val, lit.loc)
 
-    def eval_expr_LocConst(self, const: ast.LocConst) -> W_MetaArg:
-        w_val = self.vm.wrap(const.value)
-        return W_MetaArg(self.vm, "blue", TYPES.w_Loc, w_val, const.loc)
+    def eval_expr_BytesLiteral(self, lit: ast.BytesLiteral) -> W_MetaArg:
+        w_val = self.vm.wrap(lit.value)
+        return W_MetaArg(self.vm, "blue", B.w_bytes, w_val, lit.loc)
 
     def eval_expr_FQNConst(self, const: ast.FQNConst) -> W_MetaArg:
         w_value = self.vm.lookup_global(const.fqn)
@@ -1012,7 +1098,9 @@ class AbstractFrame:
             ),
         )
 
-    def _set_assignexpr_color(self, target: ast.StrConst, wam: W_MetaArg) -> W_MetaArg:
+    def _set_assignexpr_color(
+        self, target: ast.StrLiteral, wam: W_MetaArg
+    ) -> W_MetaArg:
         sym = self.symtable.lookup(target.value)
         if sym.varkind == "var":
             return wam.as_red(self.vm)
@@ -1334,7 +1422,7 @@ class ASTFrame(AbstractFrame):
         # if w_func was lowered, automatically use the most lowered version
         w_func = w_func.get_most_lowered_version()
         assert isinstance(w_func, W_ASTFunc)
-        ns = self.compute_ns(w_func, args_w)
+        ns = w_func.compute_inner_ns(args_w or [])
         super().__init__(
             vm, ns, w_func.funcdef.loc, w_func.funcdef.symtable, w_func.closure
         )
@@ -1350,45 +1438,6 @@ class ASTFrame(AbstractFrame):
         else:
             extra = ""
         return f"<{cls} for `{self.w_func.fqn}`{extra}>"
-
-    def compute_ns(
-        self, w_func: W_ASTFunc, args_w: Optional[Sequence[W_Object]]
-    ) -> FQN:
-        """
-        Try to generate a meaningful namespace for blue functions. The
-        idea is that if we blue func takes type parameters, we want to include
-        them in the qualifiers. E.g.:
-
-            @blue
-            def add(T):
-                def impl(x: T, y: T) -> T:
-                    return x + y
-                return impl
-
-            add(i32) # ==> add[i32]::impl
-            add(str) # ==> add[str]::impl
-
-        At the moment, the implementation is a bit ad-hoc and hackish, as it
-        considers ONLY type params as qualifiers, and ignores everything else.
-
-        Note that this is more about readability than correctness: in case of
-        blue params which are ignored, we might get clashing namespaces, but
-        this is still ok, because uniqueness of FQNs is guaranteed by
-        vm.get_unique_FQN().
-
-        This is fine as long as we don't support separate compilation. For sep
-        comp, we will probably need a deterministic and reproducible way to
-        compute unique FQNs out of a blue call.
-        """
-        if w_func.color == "red":
-            return w_func.fqn
-        assert args_w is not None
-        ns = w_func.fqn
-        quals = []
-        for w_arg in args_w:
-            if isinstance(w_arg, W_Type):
-                quals.append(w_arg.fqn)
-        return ns.with_qualifiers(quals)
 
     def run(self, args_w: Sequence[W_Object]) -> W_Object:
         assert self.w_func.is_valid, "w_func has been redshifted"

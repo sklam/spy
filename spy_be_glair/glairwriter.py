@@ -1,5 +1,4 @@
 import math
-from types import NoneType
 from typing import TYPE_CHECKING
 
 from spy import ast
@@ -54,6 +53,20 @@ def _fmt_float_body(val: float) -> str:
     elif s.startswith("-."):
         s = "-0." + s[2:]
     return s
+
+
+def _fmt_float_literal(f: float, suffix: str) -> C.Expr:
+    body = _fmt_float_body(f)
+    if body.startswith("-"):
+        return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
+    return C.Literal(f"{body}{suffix}")
+
+
+def _fmt_complex_component(f: float) -> str:
+    body = _fmt_float_body(f)
+    if body.startswith("-"):
+        return f"-{body[1:]}_f64"
+    return f"{body}_f64"
 
 
 def _escape_glair_asm(asm: str) -> str:
@@ -394,61 +407,30 @@ class GlairFuncWriter:
     # ===== expressions =====
 
     def fmt_expr_Const(self, const: ast.Const) -> C.Expr:
-        # XXX: Hack for migration
-        # TODO: this should match on const.w_T instead of the value in w_val.
-        import ctypes
-
-        from spy.vm.modules.types import TYPES
-
-        if const.w_T == TYPES.w_NoneType:
+        w_T = const.w_T
+        if w_T is TYPES.w_NoneType:
             return C.Void()
-
-        const_value = const.w_val.value
-        T = type(const_value)
-        if T is bool:
-            return C.Literal("true" if const_value else "false")
-        elif T is float:
-            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
-            body = _fmt_float_body(float(const_value))
-            if body.startswith("-"):
-                return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
-            return C.Literal(f"{body}{suffix}")
-        elif T is ctypes.c_float:
-            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
-            body = _fmt_float_body(float(const_value.value))
-            if body.startswith("-"):
-                return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
-            return C.Literal(f"{body}{suffix}")
-        elif T is complex:
-            val = complex(const_value)
-            re_body = _fmt_float_body(val.real)
-            im_body = _fmt_float_body(val.imag)
+        elif w_T is B.w_bool:
+            return C.Literal("true" if const.w_val.value else "false")
+        elif w_T in (B.w_f32, B.w_f64):
+            raw = const.w_val.value
+            # W_F32 stores value as ctypes.c_float; W_F64 stores a plain float
+            f = float(raw.value) if w_T is B.w_f32 else float(raw)
+            return _fmt_float_literal(f, _SUFFIX_MAP[w_T])
+        elif w_T is B.w_complex128:
+            val = complex(const.w_val.value)
+            re_expr = _fmt_complex_component(val.real)
+            im_expr = _fmt_complex_component(val.imag)
             # Use named-field compound literal syntax
-            if re_body.startswith("-"):
-                re_expr = f"-{re_body[1:]}_f64"
-            else:
-                re_expr = f"{re_body}_f64"
-            if im_body.startswith("-"):
-                im_expr = f"-{im_body[1:]}_f64"
-            else:
-                im_expr = f"{im_body}_f64"
             return C.Literal(f"spy_Complex128 {{ real: {re_expr}, imag: {im_expr}, }}")
+        elif w_T in (B.w_i8, B.w_u8, B.w_i32, B.w_u32):
+            suffix = _SUFFIX_MAP[w_T]
+            val = int(const.w_val.value)
+            if val < 0:
+                return C.UnaryOp("-", C.Literal(f"{-val}{suffix}"))
+            return C.Literal(f"{val}{suffix}")
         else:
-            from fixedint.aliases import Int32, UInt8
-
-            match const_value:
-                case UInt8(val):
-                    suffix = "_u8"
-                    val = int(const_value)
-                    return C.Literal(f"{val}{suffix}")
-                case Int32(val):
-                    suffix = "_i32"
-                    val = int(const_value)
-                    if val < 0:
-                        return C.UnaryOp("-", C.Literal(f"{-val}{suffix}"))
-                    return C.Literal(f"{val}{suffix}")
-                case _:
-                    raise TypeError(f"unsupported type: {type(const_value)}")
+            raise TypeError(f"unsupported Const type: {w_T}")
 
     def fmt_expr_StrLiteral(self, const: ast.StrLiteral) -> C.Expr:
         # String literals must be initialized as GLAIR globals.

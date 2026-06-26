@@ -398,11 +398,14 @@ class GlairFuncWriter:
         # TODO: this should match on const.w_T instead of the value in w_val.
         import ctypes
 
+        from spy.vm.modules.types import TYPES
+
+        if const.w_T == TYPES.w_NoneType:
+            return C.Void()
+
         const_value = const.w_val.value
         T = type(const_value)
-        if T is NoneType:
-            return C.Void()
-        elif T is bool:
+        if T is bool:
             return C.Literal("true" if const_value else "false")
         elif T is float:
             suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]

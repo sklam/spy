@@ -393,28 +393,31 @@ class GlairFuncWriter:
 
     # ===== expressions =====
 
-    def fmt_expr_Constant(self, const: ast.Constant) -> C.Expr:
-        T = type(const.value)
-        assert T in (int, float, complex, bool, NoneType)
+    def fmt_expr_Const(self, const: ast.Const) -> C.Expr:
+        # XXX: Hack for migration
+        # TODO: this should match on const.w_T instead of the value in w_val.
+        import ctypes
+
+        const_value = const.w_val.value
+        T = type(const_value)
         if T is NoneType:
             return C.Void()
         elif T is bool:
-            return C.Literal("true" if const.value else "false")
-        elif T is int:
-            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
-            val = int(const.value)
-            if val < 0:
-                return C.UnaryOp("-", C.Literal(f"{-val}{suffix}"))
-            return C.Literal(f"{val}{suffix}")
+            return C.Literal("true" if const_value else "false")
         elif T is float:
             suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
-            body = _fmt_float_body(float(const.value))
+            body = _fmt_float_body(float(const_value))
             if body.startswith("-"):
                 return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
             return C.Literal(f"{body}{suffix}")
-        else:
-            assert T is complex
-            val = complex(const.value)
+        elif T is ctypes.c_float:
+            suffix = _SUFFIX_MAP.get(const.w_T, "")  # type: ignore[arg-type]
+            body = _fmt_float_body(float(const_value.value))
+            if body.startswith("-"):
+                return C.UnaryOp("-", C.Literal(f"{body[1:]}{suffix}"))
+            return C.Literal(f"{body}{suffix}")
+        elif T is complex:
+            val = complex(const_value)
             re_body = _fmt_float_body(val.real)
             im_body = _fmt_float_body(val.imag)
             # Use named-field compound literal syntax
@@ -427,8 +430,24 @@ class GlairFuncWriter:
             else:
                 im_expr = f"{im_body}_f64"
             return C.Literal(f"spy_Complex128 {{ real: {re_expr}, imag: {im_expr}, }}")
+        else:
+            from fixedint.aliases import Int32, UInt8
 
-    def fmt_expr_StrConst(self, const: ast.StrConst) -> C.Expr:
+            match const_value:
+                case UInt8(val):
+                    suffix = "_u8"
+                    val = int(const_value)
+                    return C.Literal(f"{val}{suffix}")
+                case Int32(val):
+                    suffix = "_i32"
+                    val = int(const_value)
+                    if val < 0:
+                        return C.UnaryOp("-", C.Literal(f"{-val}{suffix}"))
+                    return C.Literal(f"{val}{suffix}")
+                case _:
+                    raise TypeError(f"unsupported type: {type(const_value)}")
+
+    def fmt_expr_StrLiteral(self, const: ast.StrLiteral) -> C.Expr:
         # String literals must be initialized as GLAIR globals.
         # Generate:
         #     let _g_str0: spy_Str = spy_Str { length: N_usize, flags: 0_i32, data: "...", };
@@ -632,7 +651,7 @@ class GlairFuncWriter:
 
         elif irtag.tag in ("ptr.getitem", "ptr.store"):
             # Remove the trailing W_Loc argument (GLAIR has @loc annotations instead)
-            assert isinstance(call.args[-1], ast.LocConst)
+            assert isinstance(call.args[-1], ast.Const), call.args[-1]
             call.args.pop()
             # GLAIR §3.3: ptr_wrapper ops are *implicitly* declared as
             # `<wrapper>_load` / `<wrapper>_store` (underscore separator).
@@ -649,9 +668,7 @@ class GlairFuncWriter:
                         c_name = c_name[: -len(suffix)] + "_load"
                         break
                 else:
-                    raise AssertionError(
-                        f"unexpected ptr.getitem fqn: {fqn.c_name!r}"
-                    )
+                    raise AssertionError(f"unexpected ptr.getitem fqn: {fqn.c_name!r}")
             c_args = [self.fmt_expr(arg) for arg in call.args]
             return C.Call(c_name, c_args)
 
@@ -704,7 +721,7 @@ class GlairFuncWriter:
         return C.Dot(c_struct, name)
 
     def fmt_ptr_getfield(self, fqn: FQN, call: ast.Call, irtag: IRTag) -> C.Expr:
-        assert isinstance(call.args[1], ast.StrConst)
+        assert isinstance(call.args[1], ast.StrLiteral)
         c_ptr = self.fmt_expr(call.args[0])
         attr = call.args[1].value
         offset = call.args[2]  # ignored
@@ -716,7 +733,7 @@ class GlairFuncWriter:
             return c_field
 
     def fmt_ptr_setfield(self, fqn: FQN, call: ast.Call) -> C.Expr:
-        assert isinstance(call.args[1], ast.StrConst)
+        assert isinstance(call.args[1], ast.StrLiteral)
         c_ptr = self.fmt_expr(call.args[0])
         attr = call.args[1].value
         offset = call.args[2]  # ignored
